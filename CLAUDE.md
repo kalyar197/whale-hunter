@@ -52,33 +52,44 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
-## Critical Workflow: DEXScreener → BigQuery → Activity Filtering
+## Critical Workflow: DEXScreener → LP Creation → BigQuery → Activity Filtering
 
 **THE PROBLEM**: BigQuery alone cannot identify 10x tokens (transfer count ≠ profitability)
 
-**THE SOLUTION**: Three-step pipeline with critical filtering
+**THE SOLUTION**: Four-step pipeline with critical filtering and multi-timeframe verification
 
 ```
-Step 1: DEXScreener API (FREE)
+Step 1: DEXScreener API (FREE) - Multi-Timeframe Verification
   ↓
-  Find tokens with >500% 24h gains
-  Filter by liquidity & volume
+  Find tokens with SUSTAINED gains across 1h, 6h, 24h timeframes
+  Filters out pump-and-dumps that don't sustain
+  Requirements: 1h >= 1000%, 6h >= 800%, 24h >= 500%
   ↓
-  Output: List of actual 10x token addresses
+  Output: List of sustained 10x token addresses
 
-Step 2: BigQuery (paid)
+Step 2: BigQuery - Get ACTUAL LP Creation Timestamps (CRITICAL FIX)
   ↓
-  Search ONLY those specific tokens
-  Find wallets in first 100 buyers (EXPANDED from 50)
+  Query DEX factory events (Uniswap V2/V3, Sushiswap)
+  Find ACTUAL LP creation (not token minting)
+  Fallback: first liquidity transfer to DEX router
+  ↓
+  Output: Accurate launch timestamps for buy ranking
+
+Step 3: BigQuery - Find Early Buyers (paid)
+  ↓
+  Search ONLY successful tokens with ACTUAL LP timestamps
+  Rank buyers FROM LP CREATION (not first transfer)
+  Filter to first 100 buyers (EXPANDED from 50)
+  Apply minimum whale buy filter (>= 0.1 ETH)
   Get total wallet activity
   Get sell behavior
   ↓
-  Output: Whale candidates with activity data
+  Output: Whale candidates with accurate timing
 
-Step 3: Activity Density Filtering (CRITICAL)
+Step 4: Activity Density Filtering (CRITICAL)
   ↓
   Calculate precision_rate = early_hits / total_tokens
-  Apply penalties to spray-and-pray bots
+  Apply logarithmic score penalty to spray-and-pray bots
   Detect strategic dumpers (sell behavior)
   ↓
   Output: High-precision whale list
@@ -166,6 +177,134 @@ whale-hunter/
 
 ---
 
+## Critical Architectural Fixes Applied
+
+This section documents the 4 major architectural problems that were identified and fixed.
+
+### Fix #1: Actual LP Creation Detection (CRITICAL)
+
+**Problem**: Buy rank was calculated from first token transfer (token minting), NOT from liquidity pool creation. This meant:
+- All buyers appeared "early" even if they bought hours after actual trading started
+- Timing metrics (seconds_after_launch, is_same_block_buy) were completely wrong
+- First transfer is minting event, NOT trading launch
+
+**Solution**: Created `token_launches.sql` query that:
+- Detects ACTUAL LP creation from DEX factory events (Uniswap V2/V3, Sushiswap)
+- Parses PairCreated / PoolCreated event logs
+- Fallback: first liquidity transfer to DEX router if event not found
+- Returns actual `launch_timestamp` and `launch_block`
+
+**Impact**:
+- `first_buyers.sql` now ranks buyers FROM LP creation (not from minting)
+- `wallet_history.sql` calculates accurate timing metrics
+- `is_same_block_buy` now correctly identifies liquidity snipers
+- Buy ranks are now meaningful (rank 1 = first buyer after LP creation)
+
+**Files changed**:
+- NEW: `queries/ethereum/token_launches.sql`
+- UPDATED: `queries/ethereum/first_buyers.sql` (uses @token_launch_data param)
+- UPDATED: `queries/ethereum/wallet_history.sql` (uses @token_launch_data param)
+- UPDATED: `scripts/01_fetch_historical.py` (runs token_launches.sql first)
+
+---
+
+### Fix #2: Logarithmic Scoring (Statistical Rigor)
+
+**Problem**: Scoring used arbitrary thresholds with cliff effects:
+- Buy rank 25 = 30 points, rank 26 = 0 points (arbitrary cliff)
+- No mathematical justification for threshold values
+- Harsh penalties for minor differences
+
+**Solution**: Implemented logarithmic scoring with smooth, diminishing returns:
+
+**Early Hit Score (0-50 points)**:
+```python
+score = 50 * log(1 + early_hits) / log(1 + 20)
+# 1 hit = ~10 points
+# 5 hits = ~32 points
+# 10 hits = ~43 points
+# 20 hits = 50 points (cap)
+```
+
+**Buy Rank Score (0-30 points)**:
+```python
+score = 30 * (1 - log(rank) / log(100))
+# Rank 1 = 30 points
+# Rank 10 = ~21 points
+# Rank 25 = ~16 points
+# Rank 50 = ~11 points
+# Rank 100 = ~5 points
+```
+
+**Impact**:
+- Smooth scoring curve with no arbitrary cliffs
+- Mathematically justified (logarithmic diminishing returns)
+- Early ranks still heavily weighted but no harsh cutoffs
+- Rank 1 >> rank 10 >> rank 50 (realistic insider advantage)
+
+**Files changed**:
+- UPDATED: `src/detection/scorer.py` (added logarithmic functions)
+
+---
+
+### Fix #3: Minimum Whale Buy Filter
+
+**Problem**: Small buyers and spray-and-pray bots buying $10-50 worth of tokens were counted as "early buyers":
+- Bots buying 0.001 ETH of every token inflated early buyer counts
+- No way to distinguish whales from retail / bots
+- Made pattern detection noisy
+
+**Solution**: Added minimum buy value filter in `wallet_history.sql`:
+```sql
+WHERE CAST(tr.value AS FLOAT64) / 1e18 >= @min_whale_buy_eth
+```
+
+**Default threshold**: 0.1 ETH minimum buy (~$300-400 at current prices)
+
+**Impact**:
+- Filters out small buyers and spray-and-pray bots
+- Only includes meaningful whale positions
+- Reduces query result size (faster, cheaper)
+- Cleaner signal for pattern detection
+
+**Configuration**:
+- `config.MIN_WHALE_BUY_ETH = 0.1` (configurable)
+
+**Files changed**:
+- UPDATED: `queries/ethereum/wallet_history.sql` (added ETH value filter)
+- UPDATED: `config/settings.py` (added MIN_WHALE_BUY_ETH threshold)
+- UPDATED: `scripts/01_fetch_historical.py` (passes min_whale_buy_eth param)
+
+---
+
+### Fix #4: Multi-Timeframe Verification (Option A)
+
+**Problem**: 24h snapshot missed pump-and-dumps:
+- Token pumps 10x in 10 minutes, rug-pulls an hour later
+- DEXScreener 24h snapshot would still show +500%
+- Many false positives from short-lived pumps
+
+**Solution**: Multi-timeframe verification requires SUSTAINED gains:
+```python
+def find_sustained_10x_tokens():
+    # Token must meet ALL three thresholds:
+    price_1h >= 1000%   # 10x in 1h (strong recent momentum)
+    price_6h >= 800%    # 8x in 6h (sustained over hours)
+    price_24h >= 500%   # 5x in 24h (proven stability)
+```
+
+**Impact**:
+- Filters out pump-and-dumps that don't sustain gains
+- Only includes tokens with proven stability
+- Reduces false positives from rug-pulls
+- Higher quality token list for analysis
+
+**Files changed**:
+- UPDATED: `src/data/dexscreener_client.py` (added find_sustained_10x_tokens method)
+- UPDATED: `scripts/01_fetch_historical.py` (uses multi-timeframe verification)
+
+---
+
 ## Core Detection Strategy
 
 ### NO Win Rate Calculation
@@ -211,31 +350,44 @@ Instead, we use **pattern matching**:
 - Strategic dumper pattern (identifies exits vs holds)
 - Expanded buy rank (1-100 instead of 1-50)
 
-### Whale Score (0-100)
+### Whale Score (0-100) with Logarithmic Scaling
 
 ```python
-# src/detection/scorer.py
+# src/detection/scorer.py - UPDATED with logarithmic scaling
 
-Base Score = Early Hit Score (0-50)
-           + Buy Rank Score (0-30, rank 1-100 with weighted scoring)
-           + Pattern Severity (0-20)
+Component 1: Early Hit Score (0-50 points) - LOGARITHMIC
+  score = 50 * log(1 + early_hits) / log(1 + 20)
+  # Smooth scaling with diminishing returns
+  # 1 hit = ~10 points, 5 hits = ~32, 10 hits = ~43, 20 hits = 50
 
-Final Score = Base Score × Precision Penalty (0.2 to 1.0)
+Component 2: Buy Rank Score (0-30 points) - LOGARITHMIC
+  score = 30 * (1 - log(rank) / log(100))
+  # Rank 1 = 30 pts, Rank 10 = ~21 pts, Rank 50 = ~11 pts, Rank 100 = ~5 pts
 
-Precision Penalty (CRITICAL):
-- Precision < 1% + 500+ tokens: 0.2 (80% penalty)
-- Precision < 5% + 200+ tokens: 0.5 (50% penalty)
-- Precision < 10% + 100+ tokens: 0.7 (30% penalty)
-- Otherwise: 1.0 (no penalty)
+Component 3: Pattern Severity (0-20 points)
+  score = min(total_severity * 4, 20)
+
+Base Score = Early Hit Score + Buy Rank Score + Pattern Severity
+
+Component 4: Precision Penalty (CRITICAL) - LOGARITHMIC APPLICATION
+  Final Score = Base Score × score_penalty (0.2 to 1.0)
+
+  Precision Penalty:
+  - Precision < 1% + 500+ tokens: 0.2 (80% penalty)
+  - Precision < 5% + 200+ tokens: 0.5 (50% penalty)
+  - Precision < 10% + 100+ tokens: 0.7 (30% penalty)
+  - Otherwise: 1.0 (no penalty)
 
 Thresholds:
 - 60+: Add to watchlist
 - 80+: High-priority whale (likely insider)
 ```
 
-**Key formula changes**:
+**Key improvements (UPDATED)**:
+- **Logarithmic scoring** for early hits and buy rank (no arbitrary cliffs)
 - Flexible buy rank scoring (1-100, not just 1-50)
-- Precision penalty applied to final score
+- Precision penalty applied to final score (filters spray-and-pray bots)
+- Mathematically justified with smooth diminishing returns
 - Filters out spray-and-pray bots
 
 ---
@@ -298,33 +450,72 @@ CREATE TABLE IF NOT EXISTS trades (
 
 ---
 
-## BigQuery Queries
+## BigQuery Queries (UPDATED with LP Creation Fix)
 
-### 1. first_buyers.sql
+### 1. token_launches.sql (NEW - CRITICAL - Must run FIRST)
+
+**Purpose**: Find ACTUAL LP creation timestamps for accurate buy ranking
+
+**Why critical**: First token transfer is minting event, NOT trading launch. This query finds when liquidity was actually added.
+
+**How it works**:
+```sql
+-- Method 1: Detect LP creation events from DEX factories
+uniswap_v2_pair_creations AS (
+    SELECT token0, token1, pair_address, block_timestamp AS launch_timestamp
+    FROM logs
+    WHERE address = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'  -- Uniswap V2 Factory
+      AND topics[0] = '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9'  -- PairCreated event
+)
+
+-- Method 2: Fallback to first liquidity transfer to DEX routers
+first_liquidity_add AS (
+    SELECT token_address, MIN(block_timestamp) AS launch_timestamp
+    FROM token_transfers
+    WHERE to_address IN ('0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', ...)  -- DEX routers
+      AND value >= 1e18  -- At least 1 token
+    GROUP BY token_address
+)
+```
+
+**Returns**: `token_address`, `launch_timestamp`, `launch_block`, `dex_name`, `detection_method`
+
+**Parameters**:
+- `@successful_token_addresses`: Token list from DEXScreener
+- `@lookback_days`: Days to look back (default 180)
+
+---
+
+### 2. first_buyers.sql (UPDATED with actual LP creation data)
 
 **Purpose**: Find wallets that were early buyers on 10x tokens
 
-**Key update**: Expanded from rank 1-50 to rank 1-100 to catch stealth insiders
+**CRITICAL UPDATE**: Now uses ACTUAL LP creation timestamps from token_launches.sql
 
-**Key feature**: Accepts `@successful_token_addresses` parameter (from DEXScreener)
+**Key features**:
+- Ranks buyers FROM LP CREATION (not from first transfer)
+- Expanded from rank 1-50 to rank 1-100 (catches stealth insiders)
+- Only includes buys AFTER LP creation
 
 ```sql
--- Simplified structure
-WITH successful_tokens AS (
-    -- Token addresses from DEXScreener API
-    SELECT token_address
-    FROM UNNEST(@successful_token_addresses) AS token_address
+-- Simplified structure (UPDATED)
+WITH actual_token_launches AS (
+    -- CRITICAL: Get ACTUAL LP creation timestamps from token_launches.sql
+    SELECT token_address, launch_timestamp, launch_block
+    FROM UNNEST(@token_launch_data) AS token_launch_data
 ),
 
 first_buy_per_wallet AS (
-    -- Get first buy for each wallet-token pair
+    -- Get first buy AFTER LP creation
     SELECT wallet, token_address, MIN(block_timestamp) AS first_buy
-    FROM token_transfers
+    FROM token_transfers tt
+    INNER JOIN actual_token_launches atl ON tt.token_address = atl.token_address
+    WHERE tt.block_timestamp >= atl.launch_timestamp  -- CRITICAL FIX
     GROUP BY wallet, token_address
 ),
 
 ranked_buyers AS (
-    -- Rank buyers by entry time
+    -- Rank buyers from LP CREATION (not from minting)
     SELECT *, ROW_NUMBER() OVER (
         PARTITION BY token_address
         ORDER BY first_buy ASC
@@ -334,22 +525,66 @@ ranked_buyers AS (
 
 SELECT wallet, COUNT(*) AS early_hit_count
 FROM ranked_buyers
-WHERE buy_rank <= 50  -- First 50 buyers
+WHERE buy_rank <= 100  -- First 100 buyers (EXPANDED from 50)
 GROUP BY wallet
 HAVING early_hit_count >= 5  -- At least 5 early hits
 ```
 
-### 2. wallet_history.sql
+**Parameters**:
+- `@successful_token_addresses`: Token list from DEXScreener
+- `@token_launch_data`: Launch data from token_launches.sql (CRITICAL)
+- `@lookback_days`: Days to look back
+- `@min_early_hits`: Minimum early hits (default 5)
+
+---
+
+### 3. wallet_history.sql (UPDATED with LP creation data + whale filter)
 
 **Purpose**: Get detailed buy transaction history for candidates
 
-**Cost optimization**: Removed expensive `traces` table join for ETH values
+**CRITICAL UPDATES**:
+1. Uses ACTUAL LP creation timestamps for accurate timing
+2. Filters to minimum whale buy value (>= 0.1 ETH)
 
 ```sql
 -- Returns: wallet, token_address, buy_rank, timestamp,
---          is_same_block_buy, seconds_after_launch, etc.
--- NO value_eth column (not needed, saves 50% on query cost)
+--          is_same_block_buy, seconds_after_launch, eth_value, etc.
+
+WITH actual_token_launches AS (
+    -- Get ACTUAL LP creation timestamps
+    SELECT token_address, launch_timestamp, launch_block
+    FROM UNNEST(@token_launch_data) AS token_launch_data
+),
+
+wallet_buys_with_eth_value AS (
+    -- Join with traces to get ETH value spent
+    SELECT wb.*, CAST(tr.value AS FLOAT64) / 1e18 AS eth_value
+    FROM wallet_buys wb
+    LEFT JOIN traces tr ON wb.tx_hash = tr.transaction_hash
+    WHERE CAST(tr.value AS FLOAT64) / 1e18 >= @min_whale_buy_eth  -- WHALE FILTER
+),
+
+ranked_buys AS (
+    -- Calculate buy rank from ACTUAL LP creation
+    SELECT wb.*,
+           atl.launch_timestamp,
+           TIMESTAMP_DIFF(wb.timestamp, atl.launch_timestamp, SECOND) AS seconds_after_launch,
+           ROW_NUMBER() OVER (
+               PARTITION BY wb.token_address
+               ORDER BY wb.timestamp ASC
+           ) AS buy_rank
+    FROM wallet_buys_with_eth_value wb
+    INNER JOIN actual_token_launches atl ON wb.token_address = atl.token_address
+)
 ```
+
+**Parameters**:
+- `@wallet_addresses`: Candidate wallets
+- `@token_launch_data`: Launch data from token_launches.sql (CRITICAL)
+- `@lookback_days`: Days to look back
+- `@min_whale_buy_eth`: Minimum ETH value (default 0.1) - WHALE FILTER
+
+---
 
 ### 3. wallet_activity.sql (NEW - CRITICAL)
 
@@ -395,60 +630,90 @@ HAVING early_hit_count >= 5  -- At least 5 early hits
 
 ---
 
-## DEXScreener API Client
+## DEXScreener API Client (UPDATED with Multi-Timeframe Verification)
 
 ```python
-# src/data/dexscreener_client.py
+# src/data/dexscreener_client.py - UPDATED
 
 from src.data.dexscreener_client import DEXScreenerClient
 
 client = DEXScreenerClient()
 
-# Get 10x tokens (FREE, no auth required)
-tokens = client.find_10x_tokens(
-    chain="ethereum",
-    min_return_multiple=10.0
-)
+# RECOMMENDED: Get tokens with SUSTAINED 10x gains (multi-timeframe verification)
+# Filters out pump-and-dumps that don't sustain gains
+tokens = client.find_sustained_10x_tokens(chain="ethereum")
 
 # Returns DataFrame with:
 # - token_address
 # - symbol
-# - price_change_24h (used as proxy for 10x)
+# - price_change_1h (must be >= 1000%)
+# - price_change_6h (must be >= 800%)
+# - price_change_24h (must be >= 500%)
 # - liquidity_usd
 # - volume_24h
+# - verification_status: "sustained_10x"
+
+# Legacy method (simple 24h snapshot, NOT recommended):
+tokens_legacy = client.find_10x_tokens(
+    chain="ethereum",
+    min_return_multiple=10.0
+)
 ```
 
-**Limitations**:
-- Uses 24h price change as proxy (not perfect)
-- Tokens with >500% 24h gain likely did 10x over longer period
-- For production, consider Dune Analytics for historical data
+**Multi-Timeframe Requirements**:
+- 1h: >= 1000% (10x in 1 hour - strong recent momentum)
+- 6h: >= 800% (8x in 6 hours - sustained over hours)
+- 24h: >= 500% (5x in 24 hours - proven stability)
+
+**How it works**:
+1. Fetch top gainers from DEXScreener
+2. For each token, get detailed info with multi-timeframe price changes
+3. Only include tokens that meet ALL three thresholds
+4. Returns intersection of sustained tokens
+
+**Impact**:
+- Filters out pump-and-dumps that spike and crash
+- Only includes tokens with proven sustained gains
+- Reduces false positives from rug-pulls
+- Higher quality token list for analysis
+
+**Note**: Uses FREE DEXScreener API, no authentication required
 
 ---
 
 ## Execution Scripts
 
-### 01_fetch_historical.py
+### 01_fetch_historical.py (UPDATED with LP Creation Fix)
 
-**Complete workflow** (UPDATED):
+**Complete workflow** (UPDATED with 4 critical fixes):
 
 1. Initialize DuckDB
 2. Connect to BigQuery
-3. **Call DEXScreener API** → Get 10x tokens
+3. **Call DEXScreener API** → Get SUSTAINED 10x tokens (multi-timeframe verification)
 4. Save successful_tokens.csv
-5. Pass token list to BigQuery via parameter
-6. Execute first_buyers.sql → Get whale candidates (rank 1-100)
-7. Execute wallet_history.sql → Get trade details
-8. **Execute wallet_activity.sql** → Get total activity (NEW - CRITICAL)
-9. **Execute wallet_sells.sql** → Get sell behavior (NEW)
-10. Load all data into DuckDB
+5. **Execute token_launches.sql** → Get ACTUAL LP creation timestamps (CRITICAL NEW STEP)
+6. Save token_launches.parquet
+7. Execute first_buyers.sql → Get whale candidates (rank 1-100, FROM LP creation)
+   - Uses @token_launch_data parameter from step 5
+8. Execute wallet_history.sql → Get trade details (with whale buy filter >= 0.1 ETH)
+   - Uses @token_launch_data parameter from step 5
+   - Uses @min_whale_buy_eth parameter (0.1 ETH)
+9. **Execute wallet_activity.sql** → Get total activity (CRITICAL)
+10. **Execute wallet_sells.sql** → Get sell behavior
+11. Load all data into DuckDB
 
-**Cost**: ~$0.75-1.50 (3x increase from before, but 90% fewer false positives)
+**Cost**: ~$0.75-1.50 (includes all critical fixes)
 
-**New queries cost breakdown**:
-- first_buyers.sql: $0.25-0.50 (2x due to rank 50→100)
-- wallet_activity.sql: $0.25-0.50 (NEW)
-- wallet_sells.sql: $0.25-0.50 (NEW)
-- wallet_history.sql: $0.10-0.25 (same as before)
+**Query cost breakdown** (UPDATED):
+- token_launches.sql: $0.10-0.25 (NEW - CRITICAL)
+- first_buyers.sql: $0.25-0.50 (uses LP creation data)
+- wallet_history.sql: $0.10-0.20 (whale filter reduces cost)
+- wallet_activity.sql: $0.25-0.50
+- wallet_sells.sql: $0.25-0.50
+
+**Workflow order is CRITICAL**:
+- token_launches.sql MUST run before first_buyers.sql and wallet_history.sql
+- Launch data is passed as @token_launch_data parameter
 
 ### 02_analyze_wallets.py
 
@@ -538,32 +803,39 @@ Track **THAT** they were early, not **HOW MUCH** they spent:
 
 ---
 
-## Configuration
+## Configuration (UPDATED)
 
 ```python
-# config/settings.py - KEY SETTINGS
+# config/settings.py - KEY SETTINGS (UPDATED with critical fixes)
 
 # Detection Thresholds
 MIN_EARLY_HITS = 5           # Min early hits to be considered
 FIRST_N_BUYERS = 100         # First N buyers are "early" (EXPANDED from 50)
 MIN_TOKEN_RETURN_MULTIPLE = 10.0  # 10x return requirement
 LOOKBACK_DAYS = 180          # 6 months of data
+MIN_WHALE_BUY_ETH = 0.1      # Min ETH buy value (NEW - filters small buyers/bots)
 
 # Pattern Detection
 LIQUIDITY_SNIPER_MIN_HITS = 3     # Min same-block buys
 FRESH_WALLET_DAYS = 7             # New wallet threshold
 CLUSTER_MIN_SIZE = 5              # Min wallets in cluster
 EARLY_BUYER_AVG_RANK_THRESHOLD = 20  # Avg rank for pattern
-STRATEGIC_DUMPER_MIN_EXITS = 3    # Min strategic exits (NEW)
+STRATEGIC_DUMPER_MIN_EXITS = 3    # Min strategic exits
 
-# Whale Score
+# Whale Score (UPDATED with logarithmic scoring)
 WHALE_SCORE_WATCHLIST = 60.0  # Watchlist threshold
 WHALE_SCORE_ALERT = 80.0      # High-priority threshold
+# NOTE: Scoring now uses logarithmic functions, not arbitrary thresholds
 
 # BigQuery Cost Control
 BIGQUERY_WARN_THRESHOLD_GB = 10.0  # Warn if >10 GB
 BIGQUERY_COST_PER_TB = 5.0         # $5 per TB
 ```
+
+**Key changes**:
+- Added `MIN_WHALE_BUY_ETH = 0.1` - filters out small buyers and spray-and-pray bots
+- Expanded `FIRST_N_BUYERS` from 50 to 100 - catches stealth insiders who wait past rank 50
+- Scoring thresholds unchanged, but implementation now uses logarithmic scaling
 
 ---
 

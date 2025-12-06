@@ -64,25 +64,23 @@ def main():
         return
     print()
 
-    # Step 3: Get 10x tokens from DEXScreener
-    print("Step 3: Fetching 10x tokens from DEXScreener API...")
+    # Step 3: Get 10x tokens from DEXScreener (with multi-timeframe verification)
+    print("Step 3: Fetching SUSTAINED 10x tokens from DEXScreener API...")
+    print("Note: Using multi-timeframe verification (1h, 6h, 24h) to filter pump-and-dumps")
     print()
 
     dex_client = DEXScreenerClient()
 
-    print("Querying DEXScreener for successful tokens...")
-    print("Note: This uses 24h price changes as a proxy for 10x returns")
+    print("Querying DEXScreener for tokens with sustained gains...")
     print()
 
-    successful_tokens_df = dex_client.find_10x_tokens(
-        chain="ethereum",
-        min_return_multiple=config.MIN_TOKEN_RETURN_MULTIPLE
-    )
+    # CRITICAL: Use multi-timeframe verification (Option A)
+    successful_tokens_df = dex_client.find_sustained_10x_tokens(chain="ethereum")
 
     if successful_tokens_df.empty:
-        print("❌ No successful tokens found from DEXScreener")
+        print("❌ No sustained 10x tokens found from DEXScreener")
         print("This might be because:")
-        print("  - No tokens currently meet the 10x criteria")
+        print("  - No tokens currently meet the multi-timeframe criteria")
         print("  - DEXScreener API rate limit")
         print("  - Network issues")
         print("\nYou can manually provide token addresses or try again later.")
@@ -92,16 +90,90 @@ def main():
     successful_tokens_path = Path(config.EXPORTS_DIR) / "successful_tokens.csv"
     successful_tokens_path.parent.mkdir(parents=True, exist_ok=True)
     successful_tokens_df.to_csv(successful_tokens_path, index=False)
-    print(f"✓ Saved {len(successful_tokens_df)} successful tokens to {successful_tokens_path}")
+    print(f"✓ Saved {len(successful_tokens_df)} sustained 10x tokens to {successful_tokens_path}")
     print()
 
     # Get list of token addresses for BigQuery
     token_addresses = successful_tokens_df["token_address"].tolist()
-    print(f"Found {len(token_addresses)} token addresses to search for early buyers")
+    print(f"Found {len(token_addresses)} sustained token addresses to search for early buyers")
     print()
 
-    # Step 4: Load and estimate first_buyers query
+    # Step 3a: Get ACTUAL LP creation timestamps (CRITICAL FIX)
+    print("Step 3a: Fetching ACTUAL LP creation timestamps...")
+    print("Note: This finds when liquidity was added, not when token was minted")
+    print()
+
+    token_launches_sql_path = Path(config.QUERIES_DIR) / "token_launches.sql"
+    if not token_launches_sql_path.exists():
+        print(f"❌ Query file not found: {token_launches_sql_path}")
+        return
+
+    token_launches_sql = bq.load_query_from_file(token_launches_sql_path)
+
+    # Prepare query parameters
+    launches_job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter(
+                "successful_token_addresses",
+                "STRING",
+                token_addresses
+            ),
+            bigquery.ScalarQueryParameter(
+                "lookback_days", "INT64", config.LOOKBACK_DAYS
+            )
+        ]
+    )
+
+    # Estimate cost
+    print("Estimating token_launches query cost...")
+    dry_run_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter(
+                "successful_token_addresses",
+                "STRING",
+                token_addresses
+            ),
+            bigquery.ScalarQueryParameter(
+                "lookback_days", "INT64", config.LOOKBACK_DAYS
+            )
+        ],
+        dry_run=True,
+        use_query_cache=False
+    )
+
+    query_job = bq.client.query(token_launches_sql, job_config=dry_run_config)
+    bytes_scanned = query_job.total_bytes_processed
+    gb_scanned = bytes_scanned / (1024**3)
+    cost_usd = (bytes_scanned / (1024**4)) * config.BIGQUERY_COST_PER_TB
+
+    print(f"Query will scan {gb_scanned:.2f} GB (${cost_usd:.4f})")
+    print()
+
+    # Execute query (always proceed for small cost)
+    if cost_usd > 0.10:
+        response = input(f"This query will cost ${cost_usd:.4f}. Proceed? (y/n): ")
+        if response.lower() != "y":
+            print("Aborted by user.")
+            return
+
+    print("Fetching LP creation timestamps...")
+    try:
+        token_launches_df = bq.client.query(token_launches_sql, job_config=launches_job_config).to_dataframe()
+        print(f"✓ Found LP creation data for {len(token_launches_df)} tokens")
+
+        # Save to parquet
+        output_path = Path(config.EXPORTS_DIR) / "token_launches.parquet"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        token_launches_df.to_parquet(output_path, index=False)
+        print(f"✓ Saved to {output_path}")
+    except Exception as e:
+        print(f"❌ Query failed: {e}")
+        return
+    print()
+
+    # Step 4: Load and estimate first_buyers query (NOW with actual LP creation data)
     print("Step 4: Analyzing first_buyers query...")
+    print("Note: Now using ACTUAL LP creation timestamps for accurate buy ranking")
     print()
 
     first_buyers_sql_path = Path(config.QUERIES_DIR) / "first_buyers.sql"
@@ -111,25 +183,50 @@ def main():
 
     first_buyers_sql = bq.load_query_from_file(first_buyers_sql_path)
 
-    # Prepare query parameters with successful tokens
+    # CRITICAL: Prepare query parameters with ACTUAL LP launch data
+    # Convert launch DataFrame to list of dicts for STRUCT parameter
+    token_launch_data = token_launches_df[['token_address', 'launch_timestamp', 'launch_block']].to_dict('records')
+
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter(
                 "successful_token_addresses",
                 "STRING",
                 token_addresses
+            ),
+            bigquery.ArrayQueryParameter(
+                "token_launch_data",
+                "STRUCT",
+                token_launch_data
+            ),
+            bigquery.ScalarQueryParameter(
+                "lookback_days", "INT64", config.LOOKBACK_DAYS
+            ),
+            bigquery.ScalarQueryParameter(
+                "min_early_hits", "INT64", config.MIN_EARLY_HITS
             )
         ]
     )
 
     # Estimate cost (with parameters)
-    print("Estimating query cost with successful token list...")
+    print("Estimating query cost with successful token list and launch data...")
     dry_run_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter(
                 "successful_token_addresses",
                 "STRING",
                 token_addresses
+            ),
+            bigquery.ArrayQueryParameter(
+                "token_launch_data",
+                "STRUCT",
+                token_launch_data
+            ),
+            bigquery.ScalarQueryParameter(
+                "lookback_days", "INT64", config.LOOKBACK_DAYS
+            ),
+            bigquery.ScalarQueryParameter(
+                "min_early_hits", "INT64", config.MIN_EARLY_HITS
             )
         ],
         dry_run=True,
@@ -154,7 +251,7 @@ def main():
             return
 
     # Step 5: Execute first_buyers query
-    print("\nStep 5: Executing first_buyers query with successful tokens...")
+    print("\nStep 5: Executing first_buyers query with actual LP creation data...")
     try:
         first_buyers_df = bq.client.query(first_buyers_sql, job_config=job_config).to_dataframe()
         print(f"✓ Query completed. Retrieved {len(first_buyers_df):,} rows")
@@ -193,24 +290,47 @@ def main():
         else:
             wallet_history_sql = bq.load_query_from_file(wallet_history_sql_path)
 
-            # Prepare parameterized query
+            # CRITICAL: Prepare parameterized query with LP launch data AND min whale buy filter
             from google.cloud import bigquery
 
             job_config = bigquery.QueryJobConfig(
                 query_parameters=[
                     bigquery.ArrayQueryParameter(
                         "wallet_addresses", "STRING", wallet_addresses
+                    ),
+                    bigquery.ArrayQueryParameter(
+                        "token_launch_data",
+                        "STRUCT",
+                        token_launch_data
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "lookback_days", "INT64", config.LOOKBACK_DAYS
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "min_whale_buy_eth", "FLOAT64", config.MIN_WHALE_BUY_ETH
                     )
                 ]
             )
 
             print("\nEstimating wallet_history query cost...")
+            print(f"Note: Filtering buys >= {config.MIN_WHALE_BUY_ETH} ETH to exclude small buyers")
             # For parameterized queries, we estimate with a subset
             sample_addresses = wallet_addresses[:min(10, len(wallet_addresses))]
             sample_job_config = bigquery.QueryJobConfig(
                 query_parameters=[
                     bigquery.ArrayQueryParameter(
                         "wallet_addresses", "STRING", sample_addresses
+                    ),
+                    bigquery.ArrayQueryParameter(
+                        "token_launch_data",
+                        "STRUCT",
+                        token_launch_data
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "lookback_days", "INT64", config.LOOKBACK_DAYS
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "min_whale_buy_eth", "FLOAT64", config.MIN_WHALE_BUY_ETH
                     )
                 ],
                 dry_run=True,
@@ -463,15 +583,17 @@ def main():
     print("Data files exported:")
     exports_dir = Path(config.EXPORTS_DIR)
     if (exports_dir / "successful_tokens.csv").exists():
-        print(f"  ✓ successful_tokens.csv")
+        print(f"  ✓ successful_tokens.csv (multi-timeframe verified)")
+    if (exports_dir / "token_launches.parquet").exists():
+        print(f"  ✓ token_launches.parquet (CRITICAL - actual LP creation times)")
     if (exports_dir / "first_buyers.parquet").exists():
         print(f"  ✓ first_buyers.parquet")
     if (exports_dir / "wallet_history.parquet").exists():
-        print(f"  ✓ wallet_history.parquet")
+        print(f"  ✓ wallet_history.parquet (with whale buy filter)")
     if (exports_dir / "wallet_activity.parquet").exists():
-        print(f"  ✓ wallet_activity.parquet (NEW)")
+        print(f"  ✓ wallet_activity.parquet")
     if (exports_dir / "wallet_sells.parquet").exists():
-        print(f"  ✓ wallet_sells.parquet (NEW)")
+        print(f"  ✓ wallet_sells.parquet")
     print()
 
     print("✓ Historical data fetch completed!")

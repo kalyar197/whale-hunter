@@ -187,6 +187,103 @@ class DEXScreenerClient:
 
         return pd.DataFrame(successful_tokens)
 
+    def find_sustained_10x_tokens(
+        self,
+        chain: str = "ethereum",
+        min_liquidity_usd: float = 50000,
+        min_volume_24h: float = 10000,
+        batch_delay: float = 0.3,
+    ) -> pd.DataFrame:
+        """
+        Find tokens with SUSTAINED 10x gains across multiple timeframes (Option A).
+
+        CRITICAL: This solves the 24h snapshot problem by requiring tokens to
+        maintain gains across 1h, 6h, AND 24h timeframes. Filters out pump-and-dumps.
+
+        Multi-Timeframe Requirements (diminishing for longer periods):
+        - 1h: >= 1000% (10x) - Strong recent momentum
+        - 6h: >= 800% (8x) - Sustained over hours
+        - 24h: >= 500% (5x) - Proven stability
+
+        Strategy:
+        1. Get top gainers from DEXScreener
+        2. For each token, fetch detailed info with multi-timeframe price data
+        3. Only include tokens that meet ALL three timeframe thresholds
+        4. Return intersection of tokens that sustained gains
+
+        Args:
+            chain: Blockchain to search (ethereum, base, etc.)
+            min_liquidity_usd: Minimum liquidity to filter scams
+            min_volume_24h: Minimum 24h volume
+            batch_delay: Delay between API calls for rate limiting
+
+        Returns:
+            DataFrame with sustained 10x tokens and all timeframe data
+        """
+        print(f"Searching for SUSTAINED 10x tokens on {chain} (multi-timeframe verification)...")
+        print("Thresholds: 1h >= 1000%, 6h >= 800%, 24h >= 500%")
+
+        # Get top gainers
+        print("Fetching top gainers...")
+        top_tokens = self.get_top_gainers(
+            chain=chain,
+            min_liquidity_usd=min_liquidity_usd,
+            min_volume_24h=min_volume_24h,
+            limit=100
+        )
+
+        sustained_tokens = []
+
+        for i, token in enumerate(top_tokens):
+            token_address = token["token_address"]
+
+            # Fetch detailed info with multi-timeframe price changes
+            token_info = self.get_token_info(token_address, chain=chain)
+
+            if not token_info:
+                continue
+
+            # Extract price changes across all timeframes
+            price_1h = token_info.get("price_change_1h", 0)
+            price_6h = token_info.get("price_change_6h", 0)
+            price_24h = token_info.get("price_change_24h", 0)
+
+            # CRITICAL: Check if token sustained gains across ALL timeframes
+            # This filters out pump-and-dumps that spike and crash
+            sustained = (
+                price_1h >= 1000  # 10x in 1h
+                and price_6h >= 800  # 8x in 6h
+                and price_24h >= 500  # 5x in 24h
+            )
+
+            if sustained:
+                sustained_tokens.append(
+                    {
+                        "token_address": token_address,
+                        "symbol": token_info["symbol"],
+                        "name": token_info["name"],
+                        "price_usd": token_info["price_usd"],
+                        "price_change_1h": price_1h,
+                        "price_change_6h": price_6h,
+                        "price_change_24h": price_24h,
+                        "liquidity_usd": token_info["liquidity_usd"],
+                        "volume_24h": token_info["volume_24h"],
+                        "pair_created_at": token_info["pair_created_at"],
+                        "dex": token_info["dex"],
+                        "verification_status": "sustained_10x",
+                    }
+                )
+
+            # Rate limiting
+            if (i + 1) % 10 == 0:
+                print(f"  Processed {i+1}/{len(top_tokens)} tokens... (found {len(sustained_tokens)} sustained)")
+                time.sleep(batch_delay)
+
+        print(f"\n✅ Found {len(sustained_tokens)} tokens with SUSTAINED 10x gains across all timeframes")
+        print(f"   (Filtered out {len(top_tokens) - len(sustained_tokens)} pump-and-dumps)")
+
+        return pd.DataFrame(sustained_tokens)
+
     def get_tokens_by_age(
         self,
         chain: str = "ethereum",
@@ -228,20 +325,31 @@ def get_successful_token_list(
     chain: str = "ethereum",
     min_return: float = 10.0,
     output_file: Optional[str] = None,
+    use_multi_timeframe: bool = True,
 ) -> List[str]:
     """
     Convenience function to get a simple list of 10x+ token addresses.
 
+    UPDATED: Now uses multi-timeframe verification by default to filter pump-and-dumps.
+
     Args:
         chain: Blockchain to search
-        min_return: Minimum return multiple
+        min_return: Minimum return multiple (not used with multi_timeframe)
         output_file: Optional CSV file to save results
+        use_multi_timeframe: Use sustained gains verification (recommended)
 
     Returns:
         List of token addresses
     """
     client = DEXScreenerClient()
-    df = client.find_10x_tokens(chain=chain, min_return_multiple=min_return)
+
+    if use_multi_timeframe:
+        # RECOMMENDED: Multi-timeframe verification (Option A)
+        # Filters out pump-and-dumps that don't sustain gains
+        df = client.find_sustained_10x_tokens(chain=chain)
+    else:
+        # Legacy method: Simple 24h snapshot
+        df = client.find_10x_tokens(chain=chain, min_return_multiple=min_return)
 
     if output_file and not df.empty:
         df.to_csv(output_file, index=False)

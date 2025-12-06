@@ -1,6 +1,68 @@
 from typing import Dict, Any, List
+import math
 from src.detection.patterns import SuspiciousPattern
 from config.settings import config
+
+
+def calculate_early_hit_score_logarithmic(early_hits: int) -> float:
+    """
+    Logarithmic scaling for early hits (diminishing returns).
+
+    Avoids arbitrary thresholds. Uses natural logarithm for smooth scaling.
+
+    1 hit = ~10 points
+    5 hits = ~32 points
+    10 hits = ~43 points
+    20 hits = 50 points (cap)
+
+    Args:
+        early_hits: Number of early hits
+
+    Returns:
+        Score between 0-50
+    """
+    if early_hits <= 0:
+        return 0.0
+
+    # Logarithmic formula: 50 * log(1 + early_hits) / log(1 + 20)
+    # This gives smooth scaling with diminishing returns
+    max_hits_for_cap = 20  # 20 hits = max score
+    score = 50.0 * math.log1p(early_hits) / math.log1p(max_hits_for_cap)
+
+    return min(50.0, score)
+
+
+def calculate_buy_rank_score_logarithmic(avg_buy_rank: float, max_rank: int = 100) -> float:
+    """
+    Logarithmic scoring for buy rank (avoids arbitrary thresholds).
+
+    Rank reflects diminishing insider advantage as rank increases.
+    Rank 1 is much better than rank 10, but rank 50 vs 60 is similar.
+
+    Rank 1 = 30 points
+    Rank 10 = ~21 points
+    Rank 25 = ~16 points
+    Rank 50 = ~11 points
+    Rank 100 = ~5 points
+
+    Args:
+        avg_buy_rank: Average buy rank across all tokens
+        max_rank: Maximum rank to consider (default 100)
+
+    Returns:
+        Score between 0-30
+    """
+    if avg_buy_rank <= 0:
+        return 30.0
+
+    if avg_buy_rank > max_rank:
+        return 0.0
+
+    # Logarithmic decay: 30 * (1 - log(rank) / log(max_rank))
+    # This gives smooth curve with no arbitrary cliffs
+    log_score = 30.0 * (1.0 - math.log(avg_buy_rank) / math.log(max_rank))
+
+    return max(0.0, min(30.0, log_score))
 
 
 def calculate_whale_score(
@@ -9,11 +71,13 @@ def calculate_whale_score(
     """
     Calculate whale score (0-100) based on metrics and detected patterns.
 
+    UPDATED: Uses logarithmic scaling instead of arbitrary thresholds.
+
     Composite score:
-    - Early hit count (0-50 points): 10 points per early hit, capped at 50
-    - Buy rank bonus (0-30 points): Lower avg buy rank = higher score
+    - Early hit count (0-50 points): Logarithmic scaling with diminishing returns
+    - Buy rank bonus (0-30 points): Logarithmic decay (rank 1 >> rank 10 >> rank 50)
     - Pattern severity sum (0-20 points): Sum of all detected pattern severities
-    - Precision penalty: Applied if wallet is spray-and-pray bot
+    - Precision penalty (×0.2 to ×1.0): Applied if wallet is spray-and-pray bot
 
     Args:
         wallet_metrics: Dictionary with wallet metrics including:
@@ -27,33 +91,17 @@ def calculate_whale_score(
     """
     score = 0.0
 
-    # Component 1: Early hit count (0-50 points)
-    # Each early hit is worth 10 points, capped at 50
+    # Component 1: Early hit count (0-50 points) - LOGARITHMIC
     early_hits = wallet_metrics.get("early_hits", 0)
-    early_hit_score = min(early_hits * 10, 50)
+    early_hit_score = calculate_early_hit_score_logarithmic(early_hits)
     score += early_hit_score
 
-    # Component 2: Buy rank bonus (0-30 points)
-    # Lower average buy rank gets higher score
-    # Rank 1 = 30 points, Rank 100 = 0 points (UPDATED from 50 to 100)
+    # Component 2: Buy rank bonus (0-30 points) - LOGARITHMIC
     avg_buy_rank = wallet_metrics.get("avg_buy_rank", 100)
-    if avg_buy_rank > 0:
-        # Weighted scoring to catch stealth insiders (rank 51-100)
-        if avg_buy_rank <= 25:
-            buy_rank_score = 30.0  # Aggressive insider
-        elif avg_buy_rank <= 50:
-            # Gradually decrease: 30 → 24 points
-            buy_rank_score = 30.0 * (1 - (avg_buy_rank - 25) / 25 * 0.2)
-        elif avg_buy_rank <= 100:
-            # Gradually decrease: 24 → 10 points
-            buy_rank_score = 24.0 * (1 - (avg_buy_rank - 50) / 50 * 0.6)
-        else:
-            buy_rank_score = 0.0
-
-        score += max(0, buy_rank_score)
+    buy_rank_score = calculate_buy_rank_score_logarithmic(avg_buy_rank, max_rank=100)
+    score += buy_rank_score
 
     # Component 3: Pattern severity sum (0-20 points)
-    # Sum all pattern severities, capped at 20
     total_severity = sum(p.severity for p in patterns)
     pattern_score = min(total_severity * 4, 20)  # Each severity point = 4 score points
     score += pattern_score

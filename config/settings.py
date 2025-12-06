@@ -27,6 +27,7 @@ class Config:
     FIRST_N_BUYERS: int = 100  # Consider first N buyers as "early" (expanded from 50 to catch stealth insiders)
     MIN_TOKEN_RETURN_MULTIPLE: float = 10.0  # Token must achieve 10x return
     LOOKBACK_DAYS: int = 180  # Analyze last 6 months of data
+    MIN_WHALE_BUY_ETH: float = 0.1  # Minimum ETH buy value to filter out small buyers and spray-and-pray bots
 
     # Pattern Detection Thresholds
     LIQUIDITY_SNIPER_MIN_HITS: int = 3  # Min same-block buys to flag as sniper
