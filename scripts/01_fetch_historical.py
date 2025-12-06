@@ -27,9 +27,11 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.data.bigquery_client import BigQueryClient
+from src.data.dexscreener_client import DEXScreenerClient
 from src.data.storage import init_database, insert_wallet, insert_trades_bulk, get_database_stats
 from config.settings import config
 import pandas as pd
+from google.cloud import bigquery
 
 
 def main():
@@ -62,8 +64,44 @@ def main():
         return
     print()
 
-    # Step 3: Load and estimate first_buyers query
-    print("Step 3: Analyzing first_buyers query...")
+    # Step 3: Get 10x tokens from DEXScreener
+    print("Step 3: Fetching 10x tokens from DEXScreener API...")
+    print()
+
+    dex_client = DEXScreenerClient()
+
+    print("Querying DEXScreener for successful tokens...")
+    print("Note: This uses 24h price changes as a proxy for 10x returns")
+    print()
+
+    successful_tokens_df = dex_client.find_10x_tokens(
+        chain="ethereum",
+        min_return_multiple=config.MIN_TOKEN_RETURN_MULTIPLE
+    )
+
+    if successful_tokens_df.empty:
+        print("❌ No successful tokens found from DEXScreener")
+        print("This might be because:")
+        print("  - No tokens currently meet the 10x criteria")
+        print("  - DEXScreener API rate limit")
+        print("  - Network issues")
+        print("\nYou can manually provide token addresses or try again later.")
+        return
+
+    # Save successful tokens list
+    successful_tokens_path = Path(config.EXPORTS_DIR) / "successful_tokens.csv"
+    successful_tokens_path.parent.mkdir(parents=True, exist_ok=True)
+    successful_tokens_df.to_csv(successful_tokens_path, index=False)
+    print(f"✓ Saved {len(successful_tokens_df)} successful tokens to {successful_tokens_path}")
+    print()
+
+    # Get list of token addresses for BigQuery
+    token_addresses = successful_tokens_df["token_address"].tolist()
+    print(f"Found {len(token_addresses)} token addresses to search for early buyers")
+    print()
+
+    # Step 4: Load and estimate first_buyers query
+    print("Step 4: Analyzing first_buyers query...")
     print()
 
     first_buyers_sql_path = Path(config.QUERIES_DIR) / "first_buyers.sql"
@@ -73,23 +111,53 @@ def main():
 
     first_buyers_sql = bq.load_query_from_file(first_buyers_sql_path)
 
-    # Estimate cost and preview row count
-    analysis = bq.estimate_and_preview(first_buyers_sql)
+    # Prepare query parameters with successful tokens
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter(
+                "successful_token_addresses",
+                "STRING",
+                token_addresses
+            )
+        ]
+    )
+
+    # Estimate cost (with parameters)
+    print("Estimating query cost with successful token list...")
+    dry_run_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter(
+                "successful_token_addresses",
+                "STRING",
+                token_addresses
+            )
+        ],
+        dry_run=True,
+        use_query_cache=False
+    )
+
+    query_job = bq.client.query(first_buyers_sql, job_config=dry_run_config)
+    bytes_scanned = query_job.total_bytes_processed
+    gb_scanned = bytes_scanned / (1024**3)
+    cost_usd = (bytes_scanned / (1024**4)) * config.BIGQUERY_COST_PER_TB
+
+    print(f"Query will scan {gb_scanned:.2f} GB (${cost_usd:.4f})")
     print()
 
     # Ask user to proceed
-    if analysis["cost_usd"] > 0.10:  # More than 10 cents
+    if cost_usd > 0.10:  # More than 10 cents
         response = input(
-            f"This query will cost ${analysis['cost_usd']:.4f}. Proceed? (y/n): "
+            f"This query will cost ${cost_usd:.4f}. Proceed? (y/n): "
         )
         if response.lower() != "y":
             print("Aborted by user.")
             return
 
-    # Step 4: Execute first_buyers query
-    print("\nStep 4: Executing first_buyers query...")
+    # Step 5: Execute first_buyers query
+    print("\nStep 5: Executing first_buyers query with successful tokens...")
     try:
-        first_buyers_df = bq.query(first_buyers_sql, show_estimate=False)
+        first_buyers_df = bq.client.query(first_buyers_sql, job_config=job_config).to_dataframe()
+        print(f"✓ Query completed. Retrieved {len(first_buyers_df):,} rows")
 
         # Save to parquet
         output_path = Path(config.EXPORTS_DIR) / "first_buyers.parquet"
@@ -101,17 +169,17 @@ def main():
         return
     print()
 
-    # Step 5: Load candidate wallets into database
-    print("Step 5: Loading candidate wallets into database...")
+    # Step 6: Load candidate wallets into database
+    print("Step 6: Loading candidate wallets into database...")
     for _, row in first_buyers_df.iterrows():
         insert_wallet(con, row["wallet"], "ethereum", tags=["early_buyer_candidate"])
 
     print(f"✓ Loaded {len(first_buyers_df)} candidate wallets")
     print()
 
-    # Step 6: Fetch wallet history for candidates (if we have candidates)
+    # Step 7: Fetch wallet history for candidates (if we have candidates)
     if len(first_buyers_df) > 0:
-        print("Step 6: Fetching wallet trade history...")
+        print("Step 7: Fetching wallet trade history...")
         print(f"Note: This will fetch history for {len(first_buyers_df)} wallets")
 
         # Get wallet addresses
@@ -202,7 +270,7 @@ def main():
 
     print()
 
-    # Step 7: Print summary
+    # Step 8: Print summary
     print("=" * 70)
     print("SUMMARY")
     print("=" * 70)

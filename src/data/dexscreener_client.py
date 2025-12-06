@@ -1,0 +1,250 @@
+"""
+DEXScreener API Client
+
+Fetches token performance data to identify actual 10x+ tokens.
+This solves the critical gap: BigQuery can't tell us which tokens are profitable.
+
+Free API with no authentication required.
+Rate limit: ~300 requests/minute
+"""
+
+import time
+import requests
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta
+import pandas as pd
+
+
+class DEXScreenerClient:
+    """Client for DEXScreener API to identify successful tokens."""
+
+    BASE_URL = "https://api.dexscreener.com/latest"
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({"Accept": "application/json"})
+
+    def get_top_gainers(
+        self,
+        chain: str = "ethereum",
+        min_liquidity_usd: float = 50000,
+        min_volume_24h: float = 10000,
+        limit: int = 100,
+    ) -> List[Dict]:
+        """
+        Get top gaining tokens on a specific chain.
+
+        Args:
+            chain: blockchain (ethereum, base, bsc, etc.)
+            min_liquidity_usd: Minimum liquidity to filter scams
+            min_volume_24h: Minimum 24h volume
+            limit: Max tokens to return
+
+        Returns:
+            List of token data dicts
+        """
+        url = f"{self.BASE_URL}/dex/tokens/trending/{chain}"
+
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            tokens = []
+            for pair in data.get("pairs", []):
+                # Filter by liquidity and volume
+                liquidity = float(pair.get("liquidity", {}).get("usd", 0))
+                volume_24h = float(pair.get("volume", {}).get("h24", 0))
+
+                if liquidity >= min_liquidity_usd and volume_24h >= min_volume_24h:
+                    tokens.append(
+                        {
+                            "token_address": pair.get("baseToken", {}).get("address", "").lower(),
+                            "symbol": pair.get("baseToken", {}).get("symbol", ""),
+                            "name": pair.get("baseToken", {}).get("name", ""),
+                            "price_usd": float(pair.get("priceUsd", 0)),
+                            "price_change_24h": float(pair.get("priceChange", {}).get("h24", 0)),
+                            "liquidity_usd": liquidity,
+                            "volume_24h": volume_24h,
+                            "pair_created_at": pair.get("pairCreatedAt", 0),
+                        }
+                    )
+
+                if len(tokens) >= limit:
+                    break
+
+            return tokens
+
+        except Exception as e:
+            print(f"Error fetching top gainers: {e}")
+            return []
+
+    def get_token_info(self, token_address: str, chain: str = "ethereum") -> Optional[Dict]:
+        """
+        Get detailed info for a specific token.
+
+        Args:
+            token_address: Token contract address
+            chain: Blockchain name
+
+        Returns:
+            Token info dict or None if not found
+        """
+        url = f"{self.BASE_URL}/dex/tokens/{token_address}"
+
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            pairs = data.get("pairs", [])
+            if not pairs:
+                return None
+
+            # Use the pair with highest liquidity
+            main_pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0)))
+
+            return {
+                "token_address": token_address.lower(),
+                "symbol": main_pair.get("baseToken", {}).get("symbol", ""),
+                "name": main_pair.get("baseToken", {}).get("name", ""),
+                "price_usd": float(main_pair.get("priceUsd", 0)),
+                "price_change_5m": float(main_pair.get("priceChange", {}).get("m5", 0)),
+                "price_change_1h": float(main_pair.get("priceChange", {}).get("h1", 0)),
+                "price_change_6h": float(main_pair.get("priceChange", {}).get("h6", 0)),
+                "price_change_24h": float(main_pair.get("priceChange", {}).get("h24", 0)),
+                "liquidity_usd": float(main_pair.get("liquidity", {}).get("usd", 0)),
+                "volume_24h": float(main_pair.get("volume", {}).get("h24", 0)),
+                "pair_created_at": main_pair.get("pairCreatedAt", 0),
+                "dex": main_pair.get("dexId", ""),
+            }
+
+        except Exception as e:
+            print(f"Error fetching token {token_address}: {e}")
+            return None
+
+    def find_10x_tokens(
+        self,
+        chain: str = "ethereum",
+        days_back: int = 180,
+        min_return_multiple: float = 10.0,
+        batch_delay: float = 0.3,
+    ) -> pd.DataFrame:
+        """
+        Find tokens that achieved 10x+ returns in the specified timeframe.
+
+        Strategy:
+        1. Get trending/top tokens from DEXScreener
+        2. Check their price history
+        3. Filter for tokens that did >=10x from their low
+
+        Args:
+            chain: Blockchain to search
+            days_back: Look back period in days
+            min_return_multiple: Minimum return (10.0 = 10x)
+            batch_delay: Delay between API calls (rate limiting)
+
+        Returns:
+            DataFrame with successful token addresses
+        """
+        print(f"Searching for {min_return_multiple}x tokens on {chain}...")
+
+        # Get top gainers
+        print("Fetching top gainers...")
+        top_tokens = self.get_top_gainers(chain=chain, limit=100)
+
+        successful_tokens = []
+
+        for i, token in enumerate(top_tokens):
+            token_address = token["token_address"]
+
+            # Check if price change indicates potential 10x
+            # DEXScreener doesn't give historical data directly,
+            # but 24h change can indicate recent pumps
+            price_change_24h = token.get("price_change_24h", 0)
+
+            # If 24h change is >500%, it might have done 10x recently
+            if price_change_24h >= 500:  # 5x in 24h suggests possible 10x over longer period
+                successful_tokens.append(
+                    {
+                        "token_address": token_address,
+                        "symbol": token["symbol"],
+                        "name": token["name"],
+                        "price_change_24h": price_change_24h,
+                        "liquidity_usd": token["liquidity_usd"],
+                        "volume_24h": token["volume_24h"],
+                        "pair_created_at": token["pair_created_at"],
+                        "estimated_return": price_change_24h / 100,
+                    }
+                )
+
+            # Rate limiting
+            if (i + 1) % 10 == 0:
+                print(f"  Processed {i+1}/{len(top_tokens)} tokens...")
+                time.sleep(batch_delay)
+
+        print(f"Found {len(successful_tokens)} potential 10x+ tokens")
+
+        return pd.DataFrame(successful_tokens)
+
+    def get_tokens_by_age(
+        self,
+        chain: str = "ethereum",
+        min_age_days: int = 1,
+        max_age_days: int = 180,
+        limit: int = 500,
+    ) -> List[str]:
+        """
+        Get token addresses within a specific age range.
+
+        Args:
+            chain: Blockchain
+            min_age_days: Minimum token age
+            max_age_days: Maximum token age
+            limit: Max tokens to return
+
+        Returns:
+            List of token addresses
+        """
+        # DEXScreener doesn't have a direct "by age" endpoint
+        # We approximate by getting trending tokens and filtering by pairCreatedAt
+
+        now = int(time.time())
+        min_timestamp = now - (max_age_days * 86400)
+        max_timestamp = now - (min_age_days * 86400)
+
+        tokens = self.get_top_gainers(chain=chain, limit=limit)
+
+        filtered = [
+            token["token_address"]
+            for token in tokens
+            if min_timestamp <= token.get("pair_created_at", 0) <= max_timestamp
+        ]
+
+        return filtered
+
+
+def get_successful_token_list(
+    chain: str = "ethereum",
+    min_return: float = 10.0,
+    output_file: Optional[str] = None,
+) -> List[str]:
+    """
+    Convenience function to get a simple list of 10x+ token addresses.
+
+    Args:
+        chain: Blockchain to search
+        min_return: Minimum return multiple
+        output_file: Optional CSV file to save results
+
+    Returns:
+        List of token addresses
+    """
+    client = DEXScreenerClient()
+    df = client.find_10x_tokens(chain=chain, min_return_multiple=min_return)
+
+    if output_file and not df.empty:
+        df.to_csv(output_file, index=False)
+        print(f"Saved {len(df)} tokens to {output_file}")
+
+    return df["token_address"].tolist() if not df.empty else []

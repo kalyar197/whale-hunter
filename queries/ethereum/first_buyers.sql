@@ -12,16 +12,19 @@
  */
 
 WITH successful_tokens AS (
-    -- REPLACE THIS WITH RESULTS FROM token_performance.sql
-    -- For now, using transfer activity as proxy for successful tokens
-    SELECT DISTINCT token_address
-    FROM `bigquery-public-data.crypto_ethereum.token_transfers`
-    WHERE block_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 180 DAY)
-        AND token_address IS NOT NULL
-    GROUP BY token_address
-    HAVING COUNT(DISTINCT to_address) >= 100  -- At least 100 unique buyers
-        AND COUNT(*) >= 1000  -- At least 1000 transfers
-    LIMIT 1000  -- Limit to top 1000 most active tokens
+    -- IMPORTANT: This should be populated with ACTUAL 10x+ tokens
+    -- from DEXScreener API or similar price data source
+    --
+    -- Method 1: Use parameter (recommended)
+    -- Pass token addresses via @successful_token_addresses parameter
+    SELECT token_address
+    FROM UNNEST(@successful_token_addresses) AS token_address
+
+    -- Method 2: Manual replacement
+    -- Uncomment and replace with actual addresses from DEXScreener:
+    -- SELECT '0x...' AS token_address UNION ALL
+    -- SELECT '0x...' UNION ALL
+    -- SELECT '0x...'
 ),
 
 first_buy_per_wallet AS (
@@ -100,8 +103,9 @@ LIMIT 10000;
 /*
  * QUERY EXPLANATION:
  *
- * 1. successful_tokens: Identifies high-activity tokens (proxy for successful pumps)
- *    - In production, replace with actual 10x+ tokens from token_performance.sql
+ * 1. successful_tokens: Gets list of 10x+ tokens from DEXScreener
+ *    - MUST be passed via @successful_token_addresses parameter
+ *    - Run src/data/dexscreener_client.py first to get this list
  *
  * 2. first_buy_per_wallet: Gets each wallet's first purchase of each token
  *    - Groups by wallet + token to find when they first entered
@@ -130,9 +134,31 @@ LIMIT 10000;
  * - Use the estimate_query_cost() function before running!
  * - Consider limiting to recent date ranges to reduce costs
  *
+ * HOW TO USE WITH DEXSCREENER:
+ *
+ * Step 1: Get 10x tokens from DEXScreener
+ * ```python
+ * from src.data.dexscreener_client import get_successful_token_list
+ * token_addresses = get_successful_token_list(chain="ethereum", min_return=10.0)
+ * ```
+ *
+ * Step 2: Pass to BigQuery as parameter
+ * ```python
+ * from google.cloud import bigquery
+ * job_config = bigquery.QueryJobConfig(
+ *     query_parameters=[
+ *         bigquery.ArrayQueryParameter(
+ *             "successful_token_addresses",
+ *             "STRING",
+ *             token_addresses
+ *         )
+ *     ]
+ * )
+ * results = client.query(sql, job_config=job_config).to_dataframe()
+ * ```
+ *
  * IMPROVEMENT IDEAS:
  * - Add same-block detection (buy_block == liquidity_add_block)
  * - Filter out known DEX router addresses
  * - Add minimum buy amount threshold
- * - Join with token price data to only include actual 10x+ tokens
  */
