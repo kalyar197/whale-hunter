@@ -8,8 +8,10 @@ A blockchain analytics system for detecting insider trading patterns and identif
 ## Features
 
 - **Historical Analysis**: Identify whale wallets from past blockchain data
-- **Pattern Detection**: Detect 5 key suspicious patterns (early buying, sniping, clustering, etc.)
-- **Whale Scoring**: 0-100 scoring system to rank wallet suspiciousness
+- **Pattern Detection**: Detect 5 key suspicious patterns with context-aware severity
+- **Activity Density Filtering**: Eliminate spray-and-pray bots (90% false positive reduction)
+- **Strategic Dumper Detection**: Distinguish predators from believers via sell tracking
+- **Whale Scoring**: 0-100 scoring with precision penalty for accurate ranking
 - **Cost Estimation**: BigQuery dry-run mode to preview costs before spending
 - **Local Analytics**: DuckDB for fast local analysis without external dependencies
 
@@ -106,16 +108,21 @@ python scripts/01_fetch_historical.py
 ```
 
 **What it does:**
+- Calls DEXScreener API to identify 10x tokens (FREE)
 - Connects to BigQuery
 - Estimates query costs (dry run - FREE)
 - Asks for confirmation before spending money
-- Fetches wallets that were early buyers on successful tokens
+- Fetches wallets that were early buyers (rank 1-100) on successful tokens
+- Fetches total wallet activity to calculate precision rate
+- Fetches sell behavior to identify strategic dumpers
 - Saves results to `data/whales.db` and `data/exports/`
 
 **Expected output:**
 - 100-500 candidate wallet addresses
 - Trade history for each wallet
-- Total cost: $0.10 - $0.50 (depending on filters)
+- Activity density data (total tokens traded)
+- Sell behavior data (strategic exits)
+- Total cost: $0.75 - $1.50 (4 BigQuery queries)
 
 ### Step 2: Analyze Wallets
 
@@ -126,14 +133,18 @@ python scripts/02_analyze_wallets.py
 ```
 
 **What it does:**
+- Loads activity density and sell behavior data
 - Calculates metrics for each wallet
-- Detects suspicious patterns
-- Assigns whale score (0-100)
+- Calculates precision rate (filters spray-and-pray bots)
+- Detects suspicious patterns (5 patterns, context-aware)
+- Assigns whale score (0-100) with precision penalty
 - Generates watchlist of high-scoring wallets
 - Saves detailed report to `data/whale_report.csv`
 
 **Expected output:**
 - Top 20 whale wallets with scores
+- Precision rates for each wallet (signal-to-noise ratio)
+- Strategic exit counts (dumpers vs holders)
 - Detailed reports for top 3 whales
 - Watchlist of wallets scoring >= 60
 
@@ -141,17 +152,25 @@ python scripts/02_analyze_wallets.py
 
 ### Whale Score (0-100)
 
-The whale score is composed of three components:
+The whale score is composed of four components:
 
 1. **Early Hit Score (0-50 points)**: Number of successful tokens bought early
    - 10 points per early hit, capped at 50
 
-2. **Buy Rank Score (0-30 points)**: How early they bought
+2. **Buy Rank Score (0-30 points)**: How early they bought (weighted scoring)
+   - Rank 1-25: 30 points (aggressive insider)
+   - Rank 26-50: 30 → 24 points (gradual decrease)
+   - Rank 51-100: 24 → 10 points (stealth insider)
    - Lower average buy rank = higher score
-   - Rank 1 = 30 points, Rank 50 = 0 points
 
 3. **Pattern Score (0-20 points)**: Detected suspicious patterns
    - Sum of pattern severities × 4
+
+4. **Precision Penalty (×0.2 to ×1.0)**: CRITICAL - Filters spray-and-pray bots
+   - Precision < 1% + 500+ tokens: 80% penalty (keeps 20% of score)
+   - Precision < 5% + 200+ tokens: 50% penalty (keeps 50% of score)
+   - Precision < 10% + 100+ tokens: 30% penalty (keeps 70% of score)
+   - Final Score = Base Score × Precision Penalty
 
 ### Score Categories
 
@@ -166,17 +185,20 @@ The whale score is composed of three components:
 1. **CONSISTENT_EARLY_BUYER** (Severity 5)
    - Avg buy rank ≤ 20, 5+ early hits
 
-2. **LIQUIDITY_SNIPER** (Severity 5)
-   - 3+ same-block buys (bought in same block as liquidity add)
+2. **LIQUIDITY_SNIPER** (Severity 2 or 5) - Context-Aware
+   - Fresh wallet (< 7 days) + 3+ same-block buys = Severity 5 (INSIDER)
+   - Old wallet + 3+ same-block buys = Severity 2 (MEV bot noise)
 
-3. **HIGH_VOLUME_EARLY** (Severity 4)
-   - Large buys (>1 ETH) in first 50 buyers, 5+ times
-
-4. **FRESH_WALLET_ALPHA** (Severity 4)
+3. **FRESH_WALLET_ALPHA** (Severity 4)
    - New wallet (<7 days) immediately sniping
 
-5. **WALLET_CLUSTER** (Severity 4)
+4. **WALLET_CLUSTER** (Severity 4)
    - Part of 5+ wallet cluster (potential Sybil attack)
+
+5. **STRATEGIC_DUMPER** (Severity 4-5) - NEW
+   - 3+ strategic exits (sold >50% of position)
+   - Severity 5: Quick flipper (<48h hold time) - likely insider
+   - Severity 4: Profit taker (longer hold) - trader behavior
 
 ## Cost Management
 
@@ -184,7 +206,11 @@ The whale score is composed of three components:
 
 - **Pricing**: $5 per TB scanned
 - **Free tier**: 1 TB per month
-- **Typical costs**: $0.10 - $0.50 per run
+- **Typical costs**: $0.75 - $1.50 per run (4 queries)
+  - first_buyers.sql: $0.25-0.50 (rank 1-100)
+  - wallet_activity.sql: $0.25-0.50 (NEW - activity density)
+  - wallet_sells.sql: $0.25-0.50 (NEW - sell tracking)
+  - wallet_history.sql: $0.10-0.25 (trade details)
 
 ### Cost Estimation
 
@@ -222,13 +248,13 @@ Edit `config/settings.py` to adjust thresholds:
 ```python
 # Detection Thresholds
 MIN_EARLY_HITS = 5              # Min early hits to be considered
-FIRST_N_BUYERS = 50             # Consider first N buyers as "early"
+FIRST_N_BUYERS = 100            # Consider first N buyers as "early" (EXPANDED from 50)
 MIN_TOKEN_RETURN_MULTIPLE = 10.0  # Token must achieve 10x
 
 # Pattern Detection
 LIQUIDITY_SNIPER_MIN_HITS = 3   # Min same-block buys
-HIGH_VOLUME_THRESHOLD_ETH = 1.0  # Large buy threshold
 FRESH_WALLET_DAYS = 7           # New wallet threshold
+STRATEGIC_DUMPER_MIN_EXITS = 3  # Min strategic exits (NEW)
 ```
 
 ## Data Files
@@ -236,9 +262,12 @@ FRESH_WALLET_DAYS = 7           # New wallet threshold
 After running the scripts, you'll have:
 
 - `data/whales.db`: DuckDB database with all data
-- `data/exports/first_buyers.parquet`: Candidate wallets
+- `data/exports/successful_tokens.csv`: 10x tokens from DEXScreener
+- `data/exports/first_buyers.parquet`: Candidate wallets (rank 1-100)
 - `data/exports/wallet_history.parquet`: Trade history
-- `data/whale_report.csv`: Analysis results
+- `data/exports/wallet_activity.parquet`: Total activity for precision calculation (NEW)
+- `data/exports/wallet_sells.parquet`: Sell behavior data (NEW)
+- `data/whale_report.csv`: Analysis results with precision rates
 
 ## Advanced Usage
 

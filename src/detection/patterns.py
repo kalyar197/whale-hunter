@@ -57,17 +57,33 @@ def detect_patterns(wallet_metrics: Dict[str, Any]) -> List[SuspiciousPattern]:
             )
         )
 
-    # Pattern 2: LIQUIDITY_SNIPER
+    # Pattern 2: LIQUIDITY_SNIPER (Context-Aware)
     # 3+ same-block buys (bought in same block as liquidity add)
+    # CRITICAL: Context matters! Fresh wallet sniping = insider. Old bot sniping = MEV noise.
     if wallet_metrics.get("same_block_buys", 0) >= config.LIQUIDITY_SNIPER_MIN_HITS:
+        wallet_age_days = wallet_metrics.get("wallet_age_days", 999)
+        same_block_count = wallet_metrics.get("same_block_buys", 0)
+
+        # Fresh wallet + sniping = likely insider (HIGH severity)
+        if wallet_age_days < config.FRESH_WALLET_DAYS:
+            severity = 5
+            description = (
+                f"INSIDER SIGNAL: Fresh wallet ({wallet_age_days}d old) sniping liquidity adds "
+                f"({same_block_count} times) - likely has advance knowledge"
+            )
+        # Old wallet + sniping = generic MEV bot (LOW severity)
+        else:
+            severity = 2
+            description = (
+                f"MEV bot behavior: routine sniping ({same_block_count} same-block buys) "
+                f"on established wallet ({wallet_age_days}d old)"
+            )
+
         patterns.append(
             SuspiciousPattern(
                 name="LIQUIDITY_SNIPER",
-                severity=5,
-                description=(
-                    f"Liquidity sniper: bought in same block as liquidity add "
-                    f"{wallet_metrics['same_block_buys']} times"
-                ),
+                severity=severity,
+                description=description,
             )
         )
 
@@ -99,6 +115,36 @@ def detect_patterns(wallet_metrics: Dict[str, Any]) -> List[SuspiciousPattern]:
                     f"Part of {wallet_metrics['cluster_size']}-wallet cluster, "
                     "indicating potential Sybil attack (one entity, multiple wallets)"
                 ),
+            )
+        )
+
+    # Pattern 5: STRATEGIC_DUMPER (NEW)
+    # Wallet that buys early and sells (exits) - true predator behavior
+    # This distinguishes insiders/traders from lucky holders
+    strategic_exit_count = wallet_metrics.get("strategic_exit_count", 0)
+    avg_hold_time_hours = wallet_metrics.get("avg_hold_time_hours", 999999)
+
+    if strategic_exit_count >= config.STRATEGIC_DUMPER_MIN_EXITS:
+        # Quick flip (< 48 hours) = likely insider
+        if avg_hold_time_hours < 48:
+            severity = 5
+            description = (
+                f"PREDATOR ALERT: Strategic dumper with {strategic_exit_count} exits "
+                f"(avg hold time: {avg_hold_time_hours:.1f}h) - likely insider flipping tokens"
+            )
+        # Slower exit but still exiting = trader/profit taker
+        else:
+            severity = 4
+            description = (
+                f"Profit taker: {strategic_exit_count} strategic exits "
+                f"(avg hold time: {avg_hold_time_hours:.1f}h) - trader behavior"
+            )
+
+        patterns.append(
+            SuspiciousPattern(
+                name="STRATEGIC_DUMPER",
+                severity=severity,
+                description=description,
             )
         )
 

@@ -13,11 +13,13 @@ def calculate_whale_score(
     - Early hit count (0-50 points): 10 points per early hit, capped at 50
     - Buy rank bonus (0-30 points): Lower avg buy rank = higher score
     - Pattern severity sum (0-20 points): Sum of all detected pattern severities
+    - Precision penalty: Applied if wallet is spray-and-pray bot
 
     Args:
         wallet_metrics: Dictionary with wallet metrics including:
             - early_hits: Number of successful tokens bought early
             - avg_buy_rank: Average position in buyer queue
+            - score_penalty: Multiplier from activity density (0.0 to 1.0)
         patterns: List of detected SuspiciousPattern objects
 
     Returns:
@@ -33,18 +35,33 @@ def calculate_whale_score(
 
     # Component 2: Buy rank bonus (0-30 points)
     # Lower average buy rank gets higher score
-    # Rank 1 = 30 points, Rank 50 = 0 points, linear interpolation
-    avg_buy_rank = wallet_metrics.get("avg_buy_rank", 50)
+    # Rank 1 = 30 points, Rank 100 = 0 points (UPDATED from 50 to 100)
+    avg_buy_rank = wallet_metrics.get("avg_buy_rank", 100)
     if avg_buy_rank > 0:
-        # Normalize to 0-30 scale (inverse: lower rank = higher score)
-        buy_rank_score = max(0, 30 * (1 - (avg_buy_rank - 1) / 49))
-        score += buy_rank_score
+        # Weighted scoring to catch stealth insiders (rank 51-100)
+        if avg_buy_rank <= 25:
+            buy_rank_score = 30.0  # Aggressive insider
+        elif avg_buy_rank <= 50:
+            # Gradually decrease: 30 → 24 points
+            buy_rank_score = 30.0 * (1 - (avg_buy_rank - 25) / 25 * 0.2)
+        elif avg_buy_rank <= 100:
+            # Gradually decrease: 24 → 10 points
+            buy_rank_score = 24.0 * (1 - (avg_buy_rank - 50) / 50 * 0.6)
+        else:
+            buy_rank_score = 0.0
+
+        score += max(0, buy_rank_score)
 
     # Component 3: Pattern severity sum (0-20 points)
     # Sum all pattern severities, capped at 20
     total_severity = sum(p.severity for p in patterns)
     pattern_score = min(total_severity * 4, 20)  # Each severity point = 4 score points
     score += pattern_score
+
+    # Component 4: Apply precision penalty (CRITICAL)
+    # Downgrade spray-and-pray bots that buy every token
+    score_penalty = wallet_metrics.get("score_penalty", 1.0)
+    score = score * score_penalty
 
     # Ensure score is within 0-100 range
     score = max(0, min(100, score))

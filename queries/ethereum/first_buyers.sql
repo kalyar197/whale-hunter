@@ -63,10 +63,11 @@ ranked_buyers AS (
 ),
 
 early_buyers AS (
-    -- Filter to only first 50 buyers of each token
+    -- Filter to first 100 buyers of each token (UPDATED from 50 to catch stealth insiders)
+    -- Insiders often wait past rank 50 to blend in with retail
     SELECT *
     FROM ranked_buyers
-    WHERE buy_rank <= 50  -- First 50 buyers
+    WHERE buy_rank <= 100  -- First 100 buyers (expanded to catch rank 51-100 insiders)
 ),
 
 whale_candidates AS (

@@ -270,7 +270,183 @@ def main():
 
     print()
 
-    # Step 8: Print summary
+    # Step 8: Fetch wallet activity density (CRITICAL for filtering spray-and-pray bots)
+    if len(first_buyers_df) > 0:
+        print("Step 8: Fetching wallet activity density...")
+        print("Note: This calculates total activity to filter spray-and-pray bots")
+        print()
+
+        wallet_activity_sql_path = Path(config.QUERIES_DIR) / "wallet_activity.sql"
+        if not wallet_activity_sql_path.exists():
+            print(f"⚠️  Query file not found: {wallet_activity_sql_path}")
+            print("   Skipping activity density fetch.")
+        else:
+            wallet_activity_sql = bq.load_query_from_file(wallet_activity_sql_path)
+
+            # Prepare parameterized query
+            activity_job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter(
+                        "candidate_wallet_addresses", "STRING", wallet_addresses
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "lookback_days", "INT64", config.LOOKBACK_DAYS
+                    )
+                ]
+            )
+
+            print("Estimating wallet_activity query cost...")
+            # Dry run estimate
+            sample_addresses = wallet_addresses[:min(10, len(wallet_addresses))]
+            dry_run_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter(
+                        "candidate_wallet_addresses", "STRING", sample_addresses
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "lookback_days", "INT64", config.LOOKBACK_DAYS
+                    )
+                ],
+                dry_run=True,
+                use_query_cache=False
+            )
+
+            try:
+                query_job = bq.client.query(wallet_activity_sql, job_config=dry_run_config)
+                bytes_scanned = query_job.total_bytes_processed
+                gb_scanned = bytes_scanned / (1024**3)
+                cost_usd = (bytes_scanned / (1024**4)) * config.BIGQUERY_COST_PER_TB
+
+                # Scale to all wallets
+                scaling_factor = len(wallet_addresses) / len(sample_addresses)
+                estimated_total_cost = cost_usd * scaling_factor
+
+                print(f"Estimated cost for all {len(wallet_addresses)} wallets: ${estimated_total_cost:.4f}")
+
+                if estimated_total_cost > 0.50:
+                    response = input(f"Proceed with activity density fetch? (y/n): ")
+                    if response.lower() != "y":
+                        print("Skipped activity density fetch.")
+                    else:
+                        # Execute query
+                        print("Fetching activity density...")
+                        activity_df = bq.client.query(
+                            wallet_activity_sql, job_config=activity_job_config
+                        ).to_dataframe()
+
+                        # Save to parquet
+                        output_path = Path(config.EXPORTS_DIR) / "wallet_activity.parquet"
+                        activity_df.to_parquet(output_path, index=False)
+                        print(f"✓ Saved {len(activity_df)} wallet activity records to {output_path}")
+                else:
+                    # Cost is acceptable, just execute
+                    print("Fetching activity density...")
+                    activity_df = bq.client.query(
+                        wallet_activity_sql, job_config=activity_job_config
+                    ).to_dataframe()
+
+                    # Save
+                    output_path = Path(config.EXPORTS_DIR) / "wallet_activity.parquet"
+                    activity_df.to_parquet(output_path, index=False)
+                    print(f"✓ Saved {len(activity_df)} wallet activity records to {output_path}")
+
+            except Exception as e:
+                print(f"⚠️  Error fetching activity density: {e}")
+
+    print()
+
+    # Step 9: Fetch wallet sell behavior (identifies strategic dumpers vs holders)
+    if len(first_buyers_df) > 0:
+        print("Step 9: Fetching wallet sell behavior...")
+        print("Note: This identifies strategic dumpers (predators) vs bag holders")
+        print()
+
+        wallet_sells_sql_path = Path(config.QUERIES_DIR) / "wallet_sells.sql"
+        if not wallet_sells_sql_path.exists():
+            print(f"⚠️  Query file not found: {wallet_sells_sql_path}")
+            print("   Skipping sell behavior fetch.")
+        else:
+            wallet_sells_sql = bq.load_query_from_file(wallet_sells_sql_path)
+
+            # Prepare parameterized query
+            sells_job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter(
+                        "candidate_wallet_addresses", "STRING", wallet_addresses
+                    ),
+                    bigquery.ArrayQueryParameter(
+                        "successful_token_addresses", "STRING", token_addresses
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "lookback_days", "INT64", config.LOOKBACK_DAYS
+                    )
+                ]
+            )
+
+            print("Estimating wallet_sells query cost...")
+            # Dry run estimate
+            sample_addresses = wallet_addresses[:min(10, len(wallet_addresses))]
+            dry_run_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter(
+                        "candidate_wallet_addresses", "STRING", sample_addresses
+                    ),
+                    bigquery.ArrayQueryParameter(
+                        "successful_token_addresses", "STRING", token_addresses
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "lookback_days", "INT64", config.LOOKBACK_DAYS
+                    )
+                ],
+                dry_run=True,
+                use_query_cache=False
+            )
+
+            try:
+                query_job = bq.client.query(wallet_sells_sql, job_config=dry_run_config)
+                bytes_scanned = query_job.total_bytes_processed
+                gb_scanned = bytes_scanned / (1024**3)
+                cost_usd = (bytes_scanned / (1024**4)) * config.BIGQUERY_COST_PER_TB
+
+                # Scale to all wallets
+                scaling_factor = len(wallet_addresses) / len(sample_addresses)
+                estimated_total_cost = cost_usd * scaling_factor
+
+                print(f"Estimated cost for all {len(wallet_addresses)} wallets: ${estimated_total_cost:.4f}")
+
+                if estimated_total_cost > 0.50:
+                    response = input(f"Proceed with sell behavior fetch? (y/n): ")
+                    if response.lower() != "y":
+                        print("Skipped sell behavior fetch.")
+                    else:
+                        # Execute query
+                        print("Fetching sell behavior...")
+                        sells_df = bq.client.query(
+                            wallet_sells_sql, job_config=sells_job_config
+                        ).to_dataframe()
+
+                        # Save to parquet
+                        output_path = Path(config.EXPORTS_DIR) / "wallet_sells.parquet"
+                        sells_df.to_parquet(output_path, index=False)
+                        print(f"✓ Saved {len(sells_df)} wallet sell records to {output_path}")
+                else:
+                    # Cost is acceptable, just execute
+                    print("Fetching sell behavior...")
+                    sells_df = bq.client.query(
+                        wallet_sells_sql, job_config=sells_job_config
+                    ).to_dataframe()
+
+                    # Save
+                    output_path = Path(config.EXPORTS_DIR) / "wallet_sells.parquet"
+                    sells_df.to_parquet(output_path, index=False)
+                    print(f"✓ Saved {len(sells_df)} wallet sell records to {output_path}")
+
+            except Exception as e:
+                print(f"⚠️  Error fetching sell behavior: {e}")
+
+    print()
+
+    # Step 10: Print summary
     print("=" * 70)
     print("SUMMARY")
     print("=" * 70)
@@ -282,6 +458,20 @@ def main():
     print(f"Tokens: {stats['tokens']}")
     print(f"Patterns: {stats['patterns']}")
     print(f"Watchlist: {stats['watchlist']}")
+    print()
+
+    print("Data files exported:")
+    exports_dir = Path(config.EXPORTS_DIR)
+    if (exports_dir / "successful_tokens.csv").exists():
+        print(f"  ✓ successful_tokens.csv")
+    if (exports_dir / "first_buyers.parquet").exists():
+        print(f"  ✓ first_buyers.parquet")
+    if (exports_dir / "wallet_history.parquet").exists():
+        print(f"  ✓ wallet_history.parquet")
+    if (exports_dir / "wallet_activity.parquet").exists():
+        print(f"  ✓ wallet_activity.parquet (NEW)")
+    if (exports_dir / "wallet_sells.parquet").exists():
+        print(f"  ✓ wallet_sells.parquet (NEW)")
     print()
 
     print("✓ Historical data fetch completed!")

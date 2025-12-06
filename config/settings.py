@@ -24,7 +24,7 @@ class Config:
 
     # Detection Thresholds
     MIN_EARLY_HITS: int = 5  # Minimum number of early hits to be considered
-    FIRST_N_BUYERS: int = 50  # Consider first N buyers as "early"
+    FIRST_N_BUYERS: int = 100  # Consider first N buyers as "early" (expanded from 50 to catch stealth insiders)
     MIN_TOKEN_RETURN_MULTIPLE: float = 10.0  # Token must achieve 10x return
     LOOKBACK_DAYS: int = 180  # Analyze last 6 months of data
 
@@ -33,6 +33,7 @@ class Config:
     FRESH_WALLET_DAYS: int = 7  # New wallet threshold in days
     CLUSTER_MIN_SIZE: int = 5  # Min wallets in cluster to flag
     EARLY_BUYER_AVG_RANK_THRESHOLD: int = 20  # Avg buy rank for consistent early buyer
+    STRATEGIC_DUMPER_MIN_EXITS: int = 3  # Min strategic exits (sold >50%) to flag as dumper
 
     # Whale Score Thresholds
     WHALE_SCORE_WATCHLIST: float = 60.0  # Add to watchlist if score >= this

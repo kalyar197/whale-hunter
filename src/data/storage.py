@@ -17,16 +17,19 @@ CREATE TABLE IF NOT EXISTS wallets (
     whale_score FLOAT,
     cluster_id INTEGER,
     tags VARCHAR[],
+    strategic_exit_count INTEGER DEFAULT 0,  -- NEW: Count of strategic dumps
+    avg_hold_time_hours FLOAT,  -- NEW: Average time between buy and sell
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Individual BUY transaction records
+-- Individual transaction records (BUY and SELL)
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY,
     wallet VARCHAR NOT NULL,
     chain VARCHAR NOT NULL,
     token_address VARCHAR NOT NULL,
+    action VARCHAR NOT NULL CHECK(action IN ('BUY', 'SELL')),  -- NEW: Track buys AND sells
     amount DOUBLE,
     timestamp TIMESTAMP NOT NULL,
     block_number BIGINT NOT NULL,
@@ -151,7 +154,7 @@ def insert_trades_bulk(con: duckdb.DuckDBPyConnection, trades_df: pd.DataFrame) 
 
     Args:
         con: DuckDB connection
-        trades_df: DataFrame with columns: wallet, chain, token_address, amount,
+        trades_df: DataFrame with columns: wallet, chain, token_address, action, amount,
                    timestamp, block_number, tx_hash, tx_index, buy_rank,
                    launch_timestamp, launch_block, is_same_block_buy,
                    seconds_after_launch, blocks_after_launch
@@ -164,14 +167,19 @@ def insert_trades_bulk(con: duckdb.DuckDBPyConnection, trades_df: pd.DataFrame) 
 
     # Build column list dynamically based on what's in the DataFrame
     base_columns = ['wallet', 'chain', 'token_address', 'amount',
-                    'timestamp', 'block_number', 'tx_hash', 'tx_index', 'buy_rank']
-    optional_columns = ['launch_timestamp', 'launch_block', 'is_same_block_buy',
-                        'seconds_after_launch', 'blocks_after_launch']
+                    'timestamp', 'block_number', 'tx_hash', 'tx_index']
+    optional_columns = ['action', 'buy_rank', 'launch_timestamp', 'launch_block',
+                        'is_same_block_buy', 'seconds_after_launch', 'blocks_after_launch']
 
     columns_to_insert = base_columns.copy()
     for col in optional_columns:
         if col in trades_df.columns:
             columns_to_insert.append(col)
+
+    # If action column doesn't exist, default to 'BUY' for backward compatibility
+    if 'action' not in trades_df.columns:
+        con.execute("ALTER TABLE trades_temp ADD COLUMN action VARCHAR DEFAULT 'BUY'")
+        columns_to_insert.append('action')
 
     columns_str = ', '.join(columns_to_insert)
 

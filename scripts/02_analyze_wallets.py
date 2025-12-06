@@ -35,7 +35,7 @@ from src.data.storage import (
     insert_pattern,
     get_top_whales,
 )
-from src.analysis.wallet_metrics import calculate_wallet_metrics
+from src.analysis.wallet_metrics import calculate_wallet_metrics, calculate_activity_density
 from src.analysis.early_buyer import analyze_early_buying_pattern
 from src.detection.patterns import detect_patterns
 from src.detection.scorer import (
@@ -79,6 +79,42 @@ def main():
     print(f"Found {len(wallets_df)} wallets to analyze")
     print()
 
+    # Load activity density data (CRITICAL for filtering spray-and-pray bots)
+    print("Loading activity density data...")
+    activity_path = Path(config.EXPORTS_DIR) / "wallet_activity.parquet"
+    activity_data = {}
+    if activity_path.exists():
+        activity_df = pd.read_parquet(activity_path)
+        # Create lookup dict: wallet -> activity metrics
+        for _, row in activity_df.iterrows():
+            activity_data[row['wallet']] = {
+                'total_unique_tokens': row['total_unique_tokens'],
+                'total_tx_count': row['total_tx_count']
+            }
+        print(f"✓ Loaded activity data for {len(activity_data)} wallets")
+    else:
+        print("⚠️  No activity density data found. Precision filtering will be skipped.")
+        print("   Run 01_fetch_historical.py with wallet_activity.sql to enable this feature.")
+    print()
+
+    # Load sell behavior data (distinguishes dumpers from holders)
+    print("Loading sell behavior data...")
+    sells_path = Path(config.EXPORTS_DIR) / "wallet_sells.parquet"
+    sells_data = {}
+    if sells_path.exists():
+        sells_df = pd.read_parquet(sells_path)
+        # Create lookup dict: wallet -> sell metrics
+        for _, row in sells_df.iterrows():
+            sells_data[row['wallet']] = {
+                'strategic_exit_count': row['strategic_exit_count'],
+                'avg_hold_time_hours': row['avg_hold_time_hours']
+            }
+        print(f"✓ Loaded sell data for {len(sells_data)} wallets")
+    else:
+        print("⚠️  No sell behavior data found. Strategic dumper detection will be limited.")
+        print("   Run 01_fetch_historical.py with wallet_sells.sql to enable this feature.")
+    print()
+
     # Analyze each wallet
     results = []
     for i, row in wallets_df.iterrows():
@@ -100,18 +136,60 @@ def main():
         # Analyze early buying patterns
         early_buyer_metrics = analyze_early_buying_pattern(trades_df)
 
+        # Calculate activity density (CRITICAL - filters spray-and-pray bots)
+        activity_metrics = {}
+        if wallet in activity_data:
+            activity_metrics = calculate_activity_density(
+                total_unique_tokens=activity_data[wallet]['total_unique_tokens'],
+                successful_token_count=early_buyer_metrics['early_hits'],
+                total_tx_count=activity_data[wallet]['total_tx_count']
+            )
+        else:
+            # Default: no penalty if data not available
+            activity_metrics = {
+                'precision_rate': 1.0,
+                'is_spray_and_pray': False,
+                'score_penalty': 1.0,
+                'total_unique_tokens': 0,
+                'successful_token_count': 0,
+                'total_tx_count': 0
+            }
+
+        # Add sell behavior metrics (identifies strategic dumpers)
+        sell_metrics = {}
+        if wallet in sells_data:
+            sell_metrics = {
+                'strategic_exit_count': sells_data[wallet]['strategic_exit_count'],
+                'avg_hold_time_hours': sells_data[wallet]['avg_hold_time_hours']
+            }
+        else:
+            # Default: no exits detected
+            sell_metrics = {
+                'strategic_exit_count': 0,
+                'avg_hold_time_hours': 999999
+            }
+
         # Combine all metrics
-        combined_metrics = {**basic_metrics, **early_buyer_metrics}
+        combined_metrics = {
+            **basic_metrics,
+            **early_buyer_metrics,
+            **activity_metrics,
+            **sell_metrics
+        }
 
         # Detect patterns
         patterns = detect_patterns(combined_metrics)
 
-        # Calculate whale score
+        # Calculate whale score (with precision penalty applied)
         score = calculate_whale_score(combined_metrics, patterns)
 
         print(f"  Whale Score: {score:.2f}/100")
         print(f"  Early Hits: {combined_metrics['early_hits']}")
         print(f"  Avg Buy Rank: {combined_metrics['avg_buy_rank']:.1f}")
+        if 'precision_rate' in combined_metrics:
+            print(f"  Precision Rate: {combined_metrics['precision_rate']:.1%}")
+        if combined_metrics.get('strategic_exit_count', 0) > 0:
+            print(f"  Strategic Exits: {combined_metrics['strategic_exit_count']}")
         print(f"  Patterns: {len(patterns)}")
 
         # Update database
