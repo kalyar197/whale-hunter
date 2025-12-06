@@ -80,7 +80,6 @@ SELECT
     'ethereum' AS chain,
     rb.token_address,
     rb.amount,
-    COALESCE(tev.eth_value / 1e18, 0) AS value_eth,  -- Convert from wei to ETH
     rb.timestamp,
     rb.block_number,
     rb.tx_hash,
@@ -96,7 +95,6 @@ SELECT
         ELSE FALSE
     END AS is_same_block_buy
 FROM ranked_buys rb
-LEFT JOIN tx_eth_values tev ON rb.tx_hash = tev.transaction_hash
 ORDER BY rb.wallet, rb.timestamp ASC;
 
 /*
@@ -130,7 +128,6 @@ ORDER BY rb.wallet, rb.timestamp ASC;
  * - chain: Always 'ethereum'
  * - token_address: Token contract address
  * - amount: Token amount (raw value from transfer)
- * - value_eth: ETH value of transaction
  * - timestamp: When the buy occurred
  * - block_number: Block number of buy
  * - tx_hash: Transaction hash
@@ -145,10 +142,11 @@ ORDER BY rb.wallet, rb.timestamp ASC;
  * - Only query for confirmed candidate wallets (from first_buyers.sql)
  * - Limit date range to reduce scanning
  * - Consider batching wallet queries if you have many candidates
+ * - Removed expensive traces query for ETH values (not needed)
  *
  * PATTERN DETECTION USE CASES:
  * - Count same_block_buys per wallet (liquidity sniping)
  * - Calculate avg buy_rank (consistent early buyer)
  * - Analyze seconds_after_launch distribution (bot behavior)
- * - Track total volume in value_eth (high-volume early buyer)
+ * - Only tracking THAT they were early, not HOW MUCH they spent
  */

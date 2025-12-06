@@ -30,8 +30,6 @@ class Config:
 
     # Pattern Detection Thresholds
     LIQUIDITY_SNIPER_MIN_HITS: int = 3  # Min same-block buys to flag as sniper
-    HIGH_VOLUME_THRESHOLD_ETH: float = 1.0  # Large buy threshold in ETH
-    HIGH_VOLUME_MIN_HITS: int = 5  # Min high-volume early buys
     FRESH_WALLET_DAYS: int = 7  # New wallet threshold in days
     CLUSTER_MIN_SIZE: int = 5  # Min wallets in cluster to flag
     EARLY_BUYER_AVG_RANK_THRESHOLD: int = 20  # Avg buy rank for consistent early buyer

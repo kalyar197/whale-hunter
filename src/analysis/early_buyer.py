@@ -12,7 +12,7 @@ def analyze_early_buying_pattern(
     Args:
         wallet_trades_df: DataFrame with trade history for one wallet
                          Must include: token_address, buy_rank, is_same_block_buy,
-                         value_eth, timestamp, blocks_after_launch
+                         timestamp, blocks_after_launch
         successful_tokens: Optional list of token addresses that pumped 10x+
                           If None, treats all tokens as potentially successful
 
@@ -22,7 +22,6 @@ def analyze_early_buying_pattern(
             - avg_buy_rank: Average position in buyer queue
             - median_buy_rank: Median buy rank
             - same_block_buys: Count of same-block buys (sniping)
-            - high_volume_early_buys: Count of large early buys (>1 ETH in first 50)
             - fastest_buy_seconds: Quickest time after launch
             - avg_buy_delay_seconds: Average time after launch
             - early_buy_tokens: List of tokens bought early
@@ -50,7 +49,6 @@ def analyze_early_buying_pattern(
             "avg_buy_rank": 0,
             "median_buy_rank": 0,
             "same_block_buys": 0,
-            "high_volume_early_buys": 0,
             "fastest_buy_seconds": 0,
             "avg_buy_delay_seconds": 0,
             "early_buy_tokens": [],
@@ -79,13 +77,6 @@ def analyze_early_buying_pattern(
     if "is_same_block_buy" in early_buys.columns:
         same_block_buys = early_buys["is_same_block_buy"].sum()
 
-    # Count high-volume early buys
-    high_volume_early_buys = 0
-    if "value_eth" in early_buys.columns:
-        high_volume_early_buys = (
-            early_buys["value_eth"] >= config.HIGH_VOLUME_THRESHOLD_ETH
-        ).sum()
-
     # Timing analysis
     fastest_buy_seconds = 0
     avg_buy_delay_seconds = 0
@@ -100,7 +91,6 @@ def analyze_early_buying_pattern(
         "avg_buy_rank": float(avg_buy_rank),
         "median_buy_rank": float(median_buy_rank),
         "same_block_buys": int(same_block_buys),
-        "high_volume_early_buys": int(high_volume_early_buys),
         "fastest_buy_seconds": float(fastest_buy_seconds),
         "avg_buy_delay_seconds": float(avg_buy_delay_seconds),
         "early_buy_tokens": early_buy_tokens,

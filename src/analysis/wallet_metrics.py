@@ -10,7 +10,7 @@ def calculate_wallet_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
     NO win rate calculation - we only care about pattern matching, not profitability.
 
     Args:
-        trades_df: DataFrame with columns: wallet, token_address, amount, value_eth,
+        trades_df: DataFrame with columns: wallet, token_address, amount,
                    timestamp, block_number, buy_rank, is_same_block_buy
 
     Returns:
@@ -21,8 +21,6 @@ def calculate_wallet_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
             - first_trade_date: When wallet became active
             - last_trade_date: Most recent trade
             - wallet_age_days: Days since first transaction
-            - total_volume_eth: Total ETH spent on trades
-            - avg_trade_size_eth: Average trade size in ETH
             - tokens_traded: List of token addresses
     """
     if trades_df.empty:
@@ -33,8 +31,6 @@ def calculate_wallet_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
             "first_trade_date": None,
             "last_trade_date": None,
             "wallet_age_days": 0,
-            "total_volume_eth": 0.0,
-            "avg_trade_size_eth": 0.0,
             "tokens_traded": [],
         }
 
@@ -55,12 +51,6 @@ def calculate_wallet_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
     else:
         wallet_age_days = 0
 
-    # Calculate volume metrics
-    total_volume_eth = trades_df["value_eth"].sum() if "value_eth" in trades_df else 0.0
-    avg_trade_size_eth = (
-        trades_df["value_eth"].mean() if "value_eth" in trades_df and len(trades_df) > 0 else 0.0
-    )
-
     # Get unique tokens
     unique_tokens = trades_df["token_address"].nunique()
     tokens_traded = trades_df["token_address"].unique().tolist()
@@ -72,8 +62,6 @@ def calculate_wallet_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
         "first_trade_date": first_trade_date,
         "last_trade_date": last_trade_date,
         "wallet_age_days": wallet_age_days,
-        "total_volume_eth": float(total_volume_eth),
-        "avg_trade_size_eth": float(avg_trade_size_eth),
         "tokens_traded": tokens_traded,
     }
 

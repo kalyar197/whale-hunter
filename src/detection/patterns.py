@@ -31,7 +31,6 @@ def detect_patterns(wallet_metrics: Dict[str, Any]) -> List[SuspiciousPattern]:
             - early_hits: Number of successful tokens bought early
             - avg_buy_rank: Average position in buyer queue
             - same_block_buys: Count of same-block buys
-            - high_volume_early_buys: Count of large early buys (>1 ETH)
             - wallet_age_days: Days since wallet created
             - cluster_size: Number of wallets in connected cluster (optional)
             - total_trades: Total number of trades
@@ -72,21 +71,7 @@ def detect_patterns(wallet_metrics: Dict[str, Any]) -> List[SuspiciousPattern]:
             )
         )
 
-    # Pattern 3: HIGH_VOLUME_EARLY
-    # Large buys (>1 ETH) in first 50 buyers, 5+ times
-    if wallet_metrics.get("high_volume_early_buys", 0) >= config.HIGH_VOLUME_MIN_HITS:
-        patterns.append(
-            SuspiciousPattern(
-                name="HIGH_VOLUME_EARLY",
-                severity=4,
-                description=(
-                    f"Made {wallet_metrics['high_volume_early_buys']} large early buys "
-                    f"(>{config.HIGH_VOLUME_THRESHOLD_ETH} ETH in first 50 buyers)"
-                ),
-            )
-        )
-
-    # Pattern 4: FRESH_WALLET_ALPHA
+    # Pattern 3: FRESH_WALLET_ALPHA
     # New wallet (<7 days) that immediately starts sniping
     if (
         wallet_metrics.get("wallet_age_days", 999) <= config.FRESH_WALLET_DAYS
@@ -103,7 +88,7 @@ def detect_patterns(wallet_metrics: Dict[str, Any]) -> List[SuspiciousPattern]:
             )
         )
 
-    # Pattern 5: WALLET_CLUSTER
+    # Pattern 4: WALLET_CLUSTER
     # Part of 5+ wallet cluster with common funding source
     if wallet_metrics.get("cluster_size", 1) >= config.CLUSTER_MIN_SIZE:
         patterns.append(

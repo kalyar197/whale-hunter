@@ -28,12 +28,13 @@ CREATE TABLE IF NOT EXISTS trades (
     chain VARCHAR NOT NULL,
     token_address VARCHAR NOT NULL,
     amount DOUBLE,
-    value_eth DOUBLE,
     timestamp TIMESTAMP NOT NULL,
     block_number BIGINT NOT NULL,
     tx_hash VARCHAR NOT NULL,
     tx_index INTEGER,
     buy_rank INTEGER,
+    launch_timestamp TIMESTAMP,
+    launch_block BIGINT,
     is_same_block_buy BOOLEAN DEFAULT FALSE,
     seconds_after_launch DOUBLE,
     blocks_after_launch INTEGER,
@@ -151,8 +152,9 @@ def insert_trades_bulk(con: duckdb.DuckDBPyConnection, trades_df: pd.DataFrame) 
     Args:
         con: DuckDB connection
         trades_df: DataFrame with columns: wallet, chain, token_address, amount,
-                   value_eth, timestamp, block_number, tx_hash, tx_index, buy_rank,
-                   is_same_block_buy, seconds_after_launch, blocks_after_launch
+                   timestamp, block_number, tx_hash, tx_index, buy_rank,
+                   launch_timestamp, launch_block, is_same_block_buy,
+                   seconds_after_launch, blocks_after_launch
 
     Returns:
         Number of records inserted
@@ -161,9 +163,10 @@ def insert_trades_bulk(con: duckdb.DuckDBPyConnection, trades_df: pd.DataFrame) 
     con.register("trades_temp", trades_df)
 
     # Build column list dynamically based on what's in the DataFrame
-    base_columns = ['wallet', 'chain', 'token_address', 'amount', 'value_eth',
+    base_columns = ['wallet', 'chain', 'token_address', 'amount',
                     'timestamp', 'block_number', 'tx_hash', 'tx_index', 'buy_rank']
-    optional_columns = ['is_same_block_buy', 'seconds_after_launch', 'blocks_after_launch']
+    optional_columns = ['launch_timestamp', 'launch_block', 'is_same_block_buy',
+                        'seconds_after_launch', 'blocks_after_launch']
 
     columns_to_insert = base_columns.copy()
     for col in optional_columns:
