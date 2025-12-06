@@ -38,6 +38,9 @@ def calculate_wallet_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
             "tokens_traded": [],
         }
 
+    # Make a copy to avoid mutating the input DataFrame
+    trades_df = trades_df.copy()
+
     # Ensure timestamp is datetime
     if not pd.api.types.is_datetime64_any_dtype(trades_df["timestamp"]):
         trades_df["timestamp"] = pd.to_datetime(trades_df["timestamp"])
@@ -87,6 +90,9 @@ def get_wallet_summary_stats(trades_df: pd.DataFrame) -> Dict[str, Any]:
     """
     if trades_df.empty:
         return {}
+
+    # Make a copy to avoid mutating the input DataFrame
+    trades_df = trades_df.copy()
 
     # Ensure timestamp is datetime
     if not pd.api.types.is_datetime64_any_dtype(trades_df["timestamp"]):

@@ -1,11 +1,25 @@
 /*
  * Token Performance Analysis Query
  *
- * Find tokens that achieved significant returns (10x+) in the last 180 days.
- * This identifies successful tokens that we want to analyze for early buyers.
+ * IMPORTANT LIMITATION:
+ * This query DOES NOT actually calculate 10x returns. It uses transfer activity
+ * as a PROXY for successful tokens. This is because BigQuery public datasets
+ * don't include DEX price data needed to calculate actual returns.
  *
- * NOTE: This is a simplified version that uses token transfer data.
- * For production, you would want to join with DEX price data from Uniswap/Sushiswap.
+ * To properly detect 10x tokens, you need:
+ * 1. DEX pair creation events (Uniswap V2/V3, Sushiswap)
+ * 2. Initial liquidity add price
+ * 3. Historical price data from swap events
+ * 4. Calculate: max_return = peak_price / initial_price
+ *
+ * Alternative approaches:
+ * - Use Dune Analytics (has pre-indexed DEX data with prices)
+ * - Use The Graph protocol
+ * - Use external price APIs (CoinGecko, DexScreener)
+ * - Decode Uniswap swap events manually from traces/logs
+ *
+ * For now, this query identifies highly active tokens which you can
+ * then manually verify for 10x+ returns using external tools.
  */
 
 WITH token_launch_times AS (

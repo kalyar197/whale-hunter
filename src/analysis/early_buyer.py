@@ -124,6 +124,9 @@ def identify_sniping_behavior(wallet_trades_df: pd.DataFrame) -> Dict[str, Any]:
             "evidence": [],
         }
 
+    # Make a copy to avoid mutating the input DataFrame
+    wallet_trades_df = wallet_trades_df.copy()
+
     evidence = []
     sniping_score = 0
 
