@@ -45,6 +45,12 @@ data/exports/*.parquet
 data/exports/*.csv
 data/exports/*.json
 
+# Wallet data (keep local)
+data/master_whale_list.csv
+data/watchlist.csv
+data/successful_tokens.csv
+data/whale_report.csv
+
 # Google Cloud credentials
 *.json
 !package.json

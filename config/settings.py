@@ -25,7 +25,7 @@ class Config:
     # Detection Thresholds
     MIN_EARLY_HITS: int = 5  # Minimum number of early hits to be considered
     FIRST_N_BUYERS: int = 100  # Consider first N buyers as "early" (expanded from 50 to catch stealth insiders)
-    MIN_TOKEN_RETURN_MULTIPLE: float = 10.0  # Token must achieve 10x return
+    MIN_TOKEN_RETURN_MULTIPLE: float = 2.5  # Token must achieve 2.5x return (lowered to catch more tokens)
     LOOKBACK_DAYS: int = 180  # Analyze last 6 months of data
     MIN_WHALE_BUY_ETH: float = 0.1  # Minimum ETH buy value to filter out small buyers and spray-and-pray bots
 

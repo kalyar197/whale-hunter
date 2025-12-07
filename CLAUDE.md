@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Whale Hunter** is a blockchain analytics system for detecting insider trading patterns and identifying "whale" wallets through on-chain forensics. The goal is to find wallets that consistently buy tokens early (before pumps) through **pattern detection** (NOT profitability analysis).
 
-**Primary Target**: Ethereum/Base EVM chains
+**Current Status**: Ethereum mainnet analysis working with pattern detection enabled
 **Future Target**: Solana memecoins (via Helius API)
 
 **Key Principle**: We track THAT wallets were early, not HOW MUCH they made. No win rates, no profitability calculations - pure pattern matching.
@@ -21,12 +21,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │   ┌──────────────────┐    ┌─────────────────┐                  │
-│   │ DEXScreener API  │    │ Google BigQuery │                  │
-│   │ (Token Price)    │    │ (EVM Historical)│                  │
+│   │ Dune Analytics   │    │ Google BigQuery │                  │
+│   │ (Token Discovery)│    │ (EVM Historical)│                  │
 │   │                  │    │                 │                  │
-│   │ • 10x tokens     │    │ • Ethereum      │                  │
-│   │ • FREE API       │    │ • Token xfers   │                  │
-│   │ • No auth        │    │ • First buyers  │                  │
+│   │ • 4x+ tokens     │    │ • Ethereum      │                  │
+│   │ • 365-day data   │    │ • Token xfers   │                  │
+│   │ • Manual export  │    │ • First buyers  │                  │
 │   └────────┬─────────┘    └────────┬────────┘                  │
 │            │                       │                            │
 │            └───────────┬───────────┘                            │
@@ -36,272 +36,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 │            │                     │                             │
 │            │  • DuckDB (storage) │                             │
 │            │  • pandas (analysis)│                             │
-│            │  • networkx (graph) │                             │
+│            │  • Pattern detect   │                             │
 │            └──────────┬──────────┘                             │
 │                       ▼                                         │
 │            ┌─────────────────────┐                             │
 │            │      OUTPUTS        │                             │
 │            │                     │                             │
-│            │  • Whale watchlist  │                             │
+│            │  • Master list (ALL)│                             │
+│            │  • Watchlist (top)  │                             │
 │            │  • Pattern reports  │                             │
-│            │  • Score rankings   │                             │
 │            └─────────────────────┘                             │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## Critical Workflow: DEXScreener → LP Creation → BigQuery → Activity Filtering
-
-**THE PROBLEM**: BigQuery alone cannot identify 10x tokens (transfer count ≠ profitability)
-
-**THE SOLUTION**: Four-step pipeline with critical filtering and multi-timeframe verification
-
-```
-Step 1: DEXScreener API (FREE) - Multi-Timeframe Verification
-  ↓
-  Find tokens with SUSTAINED gains across 1h, 6h, 24h timeframes
-  Filters out pump-and-dumps that don't sustain
-  Requirements: 1h >= 1000%, 6h >= 800%, 24h >= 500%
-  ↓
-  Output: List of sustained 10x token addresses
-
-Step 2: BigQuery - Get ACTUAL LP Creation Timestamps (CRITICAL FIX)
-  ↓
-  Query DEX factory events (Uniswap V2/V3, Sushiswap)
-  Find ACTUAL LP creation (not token minting)
-  Fallback: first liquidity transfer to DEX router
-  ↓
-  Output: Accurate launch timestamps for buy ranking
-
-Step 3: BigQuery - Find Early Buyers (paid)
-  ↓
-  Search ONLY successful tokens with ACTUAL LP timestamps
-  Rank buyers FROM LP CREATION (not first transfer)
-  Filter to first 100 buyers (EXPANDED from 50)
-  Apply minimum whale buy filter (>= 0.1 ETH)
-  Get total wallet activity
-  Get sell behavior
-  ↓
-  Output: Whale candidates with accurate timing
-
-Step 4: Activity Density Filtering (CRITICAL)
-  ↓
-  Calculate precision_rate = early_hits / total_tokens
-  Apply logarithmic score penalty to spray-and-pray bots
-  Detect strategic dumpers (sell behavior)
-  ↓
-  Output: High-precision whale list
-```
-
-**See WORKFLOW.md for complete details**
-
----
-
-## Tech Stack
-
-| Component | Technology | Purpose |
-|-----------|------------|---------|
-| **Token Identification** | DEXScreener API | Identify actual 10x tokens (FREE) |
-| **EVM Historical Data** | Google BigQuery | Query blockchain for early buyers |
-| **Local Storage** | DuckDB + Parquet | Fast analytical queries locally |
-| **Analysis** | pandas, numpy, scipy | Data manipulation, statistics |
-| **Graph Analysis** | networkx | Wallet clustering, fund tracing |
-| **HTTP Requests** | requests | DEXScreener API calls |
-
-### Required Python Packages
-
-```
-duckdb>=0.9.0
-pandas>=2.0.0
-numpy>=1.24.0
-scipy>=1.11.0
-networkx>=3.1
-google-cloud-bigquery>=3.11.0
-pyarrow>=12.0.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-```
-
----
-
-## Current Project Structure
-
-```
-whale-hunter/
-├── CLAUDE.md                   # This file
-├── README.md                   # User-facing documentation
-├── WORKFLOW.md                 # Complete pipeline workflow
-├── requirements.txt
-├── .env.example
-├── .gitignore
-├── config/
-│   ├── __init__.py
-│   └── settings.py             # Configuration & thresholds
-├── src/
-│   ├── __init__.py
-│   ├── data/
-│   │   ├── __init__.py
-│   │   ├── bigquery_client.py  # BigQuery + dry-run cost estimator
-│   │   ├── dexscreener_client.py  # DEXScreener API (NEW)
-│   │   └── storage.py          # DuckDB schema & operations
-│   ├── analysis/
-│   │   ├── __init__.py
-│   │   ├── wallet_metrics.py   # Basic metrics (NO win rates)
-│   │   ├── early_buyer.py      # Early buying pattern analysis
-│   │   └── clustering.py       # Wallet network analysis
-│   ├── detection/
-│   │   ├── __init__.py
-│   │   ├── patterns.py         # 4 suspicious patterns
-│   │   └── scorer.py           # Whale score (0-100)
-│   └── utils/
-│       ├── __init__.py
-│       └── helpers.py
-├── queries/
-│   └── ethereum/
-│       ├── first_buyers.sql    # Find early buyers (uses @successful_token_addresses param)
-│       └── wallet_history.sql  # Get buy transaction history
-├── data/
-│   ├── exports/                # Parquet exports
-│   ├── whales.db              # DuckDB database
-│   └── .gitkeep
-├── scripts/
-│   ├── 01_fetch_historical.py # DEXScreener → BigQuery → DuckDB
-│   └── 02_analyze_wallets.py  # Analyze & score candidates
-└── notebooks/
-    └── exploration.ipynb       # Ad-hoc analysis
-```
-
-**Note**: Files like `helius_client.py`, `timing.py`, `token_performance.sql` were removed as they are not needed for the current implementation.
-
----
-
-## Critical Architectural Fixes Applied
-
-This section documents the 4 major architectural problems that were identified and fixed.
-
-### Fix #1: Actual LP Creation Detection (CRITICAL)
-
-**Problem**: Buy rank was calculated from first token transfer (token minting), NOT from liquidity pool creation. This meant:
-- All buyers appeared "early" even if they bought hours after actual trading started
-- Timing metrics (seconds_after_launch, is_same_block_buy) were completely wrong
-- First transfer is minting event, NOT trading launch
-
-**Solution**: Created `token_launches.sql` query that:
-- Detects ACTUAL LP creation from DEX factory events (Uniswap V2/V3, Sushiswap)
-- Parses PairCreated / PoolCreated event logs
-- Fallback: first liquidity transfer to DEX router if event not found
-- Returns actual `launch_timestamp` and `launch_block`
-
-**Impact**:
-- `first_buyers.sql` now ranks buyers FROM LP creation (not from minting)
-- `wallet_history.sql` calculates accurate timing metrics
-- `is_same_block_buy` now correctly identifies liquidity snipers
-- Buy ranks are now meaningful (rank 1 = first buyer after LP creation)
-
-**Files changed**:
-- NEW: `queries/ethereum/token_launches.sql`
-- UPDATED: `queries/ethereum/first_buyers.sql` (uses @token_launch_data param)
-- UPDATED: `queries/ethereum/wallet_history.sql` (uses @token_launch_data param)
-- UPDATED: `scripts/01_fetch_historical.py` (runs token_launches.sql first)
-
----
-
-### Fix #2: Logarithmic Scoring (Statistical Rigor)
-
-**Problem**: Scoring used arbitrary thresholds with cliff effects:
-- Buy rank 25 = 30 points, rank 26 = 0 points (arbitrary cliff)
-- No mathematical justification for threshold values
-- Harsh penalties for minor differences
-
-**Solution**: Implemented logarithmic scoring with smooth, diminishing returns:
-
-**Early Hit Score (0-50 points)**:
-```python
-score = 50 * log(1 + early_hits) / log(1 + 20)
-# 1 hit = ~10 points
-# 5 hits = ~32 points
-# 10 hits = ~43 points
-# 20 hits = 50 points (cap)
-```
-
-**Buy Rank Score (0-30 points)**:
-```python
-score = 30 * (1 - log(rank) / log(100))
-# Rank 1 = 30 points
-# Rank 10 = ~21 points
-# Rank 25 = ~16 points
-# Rank 50 = ~11 points
-# Rank 100 = ~5 points
-```
-
-**Impact**:
-- Smooth scoring curve with no arbitrary cliffs
-- Mathematically justified (logarithmic diminishing returns)
-- Early ranks still heavily weighted but no harsh cutoffs
-- Rank 1 >> rank 10 >> rank 50 (realistic insider advantage)
-
-**Files changed**:
-- UPDATED: `src/detection/scorer.py` (added logarithmic functions)
-
----
-
-### Fix #3: Minimum Whale Buy Filter
-
-**Problem**: Small buyers and spray-and-pray bots buying $10-50 worth of tokens were counted as "early buyers":
-- Bots buying 0.001 ETH of every token inflated early buyer counts
-- No way to distinguish whales from retail / bots
-- Made pattern detection noisy
-
-**Solution**: Added minimum buy value filter in `wallet_history.sql`:
-```sql
-WHERE CAST(tr.value AS FLOAT64) / 1e18 >= @min_whale_buy_eth
-```
-
-**Default threshold**: 0.1 ETH minimum buy (~$300-400 at current prices)
-
-**Impact**:
-- Filters out small buyers and spray-and-pray bots
-- Only includes meaningful whale positions
-- Reduces query result size (faster, cheaper)
-- Cleaner signal for pattern detection
-
-**Configuration**:
-- `config.MIN_WHALE_BUY_ETH = 0.1` (configurable)
-
-**Files changed**:
-- UPDATED: `queries/ethereum/wallet_history.sql` (added ETH value filter)
-- UPDATED: `config/settings.py` (added MIN_WHALE_BUY_ETH threshold)
-- UPDATED: `scripts/01_fetch_historical.py` (passes min_whale_buy_eth param)
-
----
-
-### Fix #4: Multi-Timeframe Verification (Option A)
-
-**Problem**: 24h snapshot missed pump-and-dumps:
-- Token pumps 10x in 10 minutes, rug-pulls an hour later
-- DEXScreener 24h snapshot would still show +500%
-- Many false positives from short-lived pumps
-
-**Solution**: Multi-timeframe verification requires SUSTAINED gains:
-```python
-def find_sustained_10x_tokens():
-    # Token must meet ALL three thresholds:
-    price_1h >= 1000%   # 10x in 1h (strong recent momentum)
-    price_6h >= 800%    # 8x in 6h (sustained over hours)
-    price_24h >= 500%   # 5x in 24h (proven stability)
-```
-
-**Impact**:
-- Filters out pump-and-dumps that don't sustain gains
-- Only includes tokens with proven stability
-- Reduces false positives from rug-pulls
-- Higher quality token list for analysis
-
-**Files changed**:
-- UPDATED: `src/data/dexscreener_client.py` (added find_sustained_10x_tokens method)
-- UPDATED: `scripts/01_fetch_historical.py` (uses multi-timeframe verification)
 
 ---
 
@@ -314,46 +61,30 @@ def find_sustained_10x_tokens():
 Instead, we use **pattern matching**:
 - Early buying patterns
 - Sniping behavior
-- Wallet clustering
+- Buy rank consistency
 - Timing analysis
+- Precision filtering (early hits / total activity)
 
-### 5 Suspicious Patterns (Severity 2-5)
+### 2 Key Patterns Detected (Severity 2-5)
 
 ```python
 # src/detection/patterns.py
 
 1. CONSISTENT_EARLY_BUYER (Severity 5)
    - Avg buy rank ≤ 20
-   - 5+ early hits on 10x tokens
+   - 5+ early hits on 4x+ tokens
 
 2. LIQUIDITY_SNIPER (Severity 2 or 5) - CONTEXT-AWARE
    - Fresh wallet (< 7 days) + 3+ same-block buys = Severity 5 (INSIDER)
    - Old wallet + 3+ same-block buys = Severity 2 (MEV bot noise)
-
-3. FRESH_WALLET_ALPHA (Severity 4)
-   - Wallet age < 7 days
-   - Immediately starts sniping (2+ early hits)
-
-4. WALLET_CLUSTER (Severity 4)
-   - Part of 5+ wallet cluster
-   - Common funding source (Sybil attack indicator)
-
-5. STRATEGIC_DUMPER (Severity 4-5) - NEW
-   - 3+ strategic exits (sold >50% of position)
-   - Severity 5: Quick flipper (<48h hold time) - likely insider
-   - Severity 4: Profit taker (longer hold) - trader behavior
-   - Distinguishes predators from bag holders
 ```
 
-**Key improvements**:
-- Context-aware MEV detection (severity based on wallet age)
-- Strategic dumper pattern (identifies exits vs holds)
-- Expanded buy rank (1-100 instead of 1-50)
+**Note**: Other patterns (FRESH_WALLET_ALPHA, WALLET_CLUSTER, STRATEGIC_DUMPER) are defined but currently disabled pending additional data sources.
 
 ### Whale Score (0-100) with Logarithmic Scaling
 
 ```python
-# src/detection/scorer.py - UPDATED with logarithmic scaling
+# src/detection/scorer.py - LOGARITHMIC SCORING
 
 Component 1: Early Hit Score (0-50 points) - LOGARITHMIC
   score = 50 * log(1 + early_hits) / log(1 + 20)
@@ -362,7 +93,7 @@ Component 1: Early Hit Score (0-50 points) - LOGARITHMIC
 
 Component 2: Buy Rank Score (0-30 points) - LOGARITHMIC
   score = 30 * (1 - log(rank) / log(100))
-  # Rank 1 = 30 pts, Rank 10 = ~21 pts, Rank 50 = ~11 pts, Rank 100 = ~5 pts
+  # Rank 1 = 30 pts, Rank 10 = ~21 pts, Rank 50 = ~11 pts
 
 Component 3: Pattern Severity (0-20 points)
   score = min(total_severity * 4, 20)
@@ -379,16 +110,132 @@ Component 4: Precision Penalty (CRITICAL) - LOGARITHMIC APPLICATION
   - Otherwise: 1.0 (no penalty)
 
 Thresholds:
-- 60+: Add to watchlist
-- 80+: High-priority whale (likely insider)
+- 60+: Watchlist tier (high confidence)
+- 40-59: High priority monitoring
+- 20-39: Medium priority
+- <20: Low priority
 ```
 
-**Key improvements (UPDATED)**:
+**Key improvements**:
 - **Logarithmic scoring** for early hits and buy rank (no arbitrary cliffs)
-- Flexible buy rank scoring (1-100, not just 1-50)
-- Precision penalty applied to final score (filters spray-and-pray bots)
+- Precision penalty filters spray-and-pray bots
 - Mathematically justified with smooth diminishing returns
-- Filters out spray-and-pray bots
+- Pattern detection adds 8-20 points for confirmed behavior
+
+---
+
+## Current Project Structure
+
+```
+whale-hunter/
+├── CLAUDE.md                   # This file
+├── README.md                   # User-facing documentation
+├── requirements.txt
+├── .env.example
+├── .gitignore
+├── config/
+│   ├── __init__.py
+│   └── settings.py             # Configuration & thresholds
+├── src/
+│   ├── __init__.py
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── bigquery_client.py  # BigQuery + dry-run cost estimator
+│   │   ├── geckoterminal_client.py  # GeckoTerminal API (backup)
+│   │   └── storage.py          # DuckDB schema & operations
+│   ├── analysis/
+│   │   ├── __init__.py
+│   │   ├── wallet_metrics.py   # Basic metrics (NO win rates)
+│   │   └── early_buyer.py      # Early buying pattern analysis
+│   ├── detection/
+│   │   ├── __init__.py
+│   │   ├── patterns.py         # 2 active patterns (5 total defined)
+│   │   └── scorer.py           # Whale score (0-100)
+│   └── utils/
+│       ├── __init__.py
+│       └── helpers.py
+├── queries/
+│   └── ethereum/
+│       ├── first_buyers_simple.sql    # Find early buyers (simplified)
+│       ├── wallet_history_simple.sql  # Get trade history (simplified)
+│       └── wallet_activity.sql        # Get total activity (precision calc)
+├── data/
+│   ├── master_whale_list.csv  # ** MASTER LIST - ALL WALLETS **
+│   ├── watchlist.csv          # Filtered view (score >= 40)
+│   ├── successful_tokens.csv  # Input: tokens to analyze
+│   ├── whales.db              # DuckDB database
+│   └── exports/               # BigQuery results (parquet)
+│       ├── first_buyers.parquet
+│       ├── wallet_history.parquet
+│       ├── wallet_activity.parquet
+│       ├── token_launches.parquet
+│       └── successful_tokens.csv
+├── scripts/
+│   ├── 01_fetch_historical.py # Dune/GeckoTerminal → BigQuery → DuckDB
+│   └── 02_analyze_wallets.py  # Analyze & score candidates
+├── create_watchlist.py        # Utility: regenerate watchlist from master
+└── notebooks/
+    └── exploration.ipynb       # Ad-hoc analysis
+```
+
+**Key Files**:
+- **`data/master_whale_list.csv`** - ALL wallets ever tested (97 currently)
+- **`data/watchlist.csv`** - Filtered view of top wallets (7 currently, score ≥ 40)
+- **`data/successful_tokens.csv`** - Input tokens from Dune/GeckoTerminal
+
+---
+
+## Master Whale List System
+
+### How It Works
+
+**Every analysis run adds ALL wallets to the master list:**
+1. Run `01_fetch_historical.py` → gets BigQuery data
+2. Run `02_analyze_wallets.py` → scores all wallets
+3. Results auto-merge into `master_whale_list.csv`
+4. Duplicates deduplicated (keeps highest score per wallet+chain)
+
+**Master list columns**:
+```
+wallet, chain, whale_score, early_hit_count, avg_buy_rank, best_buy_rank,
+precision_rate, total_unique_tokens, pattern_count, patterns, base_score,
+score_penalty, data_source, analysis_date, token_count, lookback_days
+```
+
+**Watchlist** is just a filtered view (score ≥ 40). Regenerate anytime:
+```bash
+python create_watchlist.py
+```
+
+### Adding New Analysis Runs
+
+When running with Helius, Solana, or different timeframes:
+
+```python
+# After running 02_analyze_wallets.py, merge results:
+import pandas as pd
+from datetime import datetime
+
+# Load new results
+new = pd.read_csv('data/whale_report.csv')
+new['chain'] = 'solana'  # or 'ethereum', 'base', etc.
+new['data_source'] = 'helius'  # or 'dune', 'geckoterminal'
+new['analysis_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+# Load master and combine ALL wallets
+master = pd.read_csv('data/master_whale_list.csv')
+combined = pd.concat([master, new], ignore_index=True)
+
+# Deduplicate (keep highest score per wallet+chain)
+combined = combined.sort_values('whale_score', ascending=False)
+combined = combined.drop_duplicates(subset=['wallet', 'chain'], keep='first')
+
+# Save ALL wallets
+combined.to_csv('data/master_whale_list.csv', index=False)
+print(f'Master list: {len(combined)} total wallets')
+```
+
+**YOU decide which wallets matter at the end, not the system.**
 
 ---
 
@@ -409,19 +256,17 @@ CREATE TABLE IF NOT EXISTS wallets (
     whale_score FLOAT,
     cluster_id INTEGER,
     tags VARCHAR[],
-    strategic_exit_count INTEGER DEFAULT 0,  -- NEW: Count of strategic dumps
-    avg_hold_time_hours FLOAT,              -- NEW: Average hold time
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 
--- Trades table (BUY and SELL transactions)
+-- Trades table (BUY transactions only currently)
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY,
     wallet VARCHAR NOT NULL,
     chain VARCHAR NOT NULL,
     token_address VARCHAR NOT NULL,
-    action VARCHAR NOT NULL CHECK(action IN ('BUY', 'SELL')),  -- NEW: Track both buys and sells
+    action VARCHAR NOT NULL CHECK(action IN ('BUY', 'SELL')),
     amount DOUBLE,
     timestamp TIMESTAMP NOT NULL,
     block_number BIGINT NOT NULL,
@@ -435,158 +280,93 @@ CREATE TABLE IF NOT EXISTS trades (
     blocks_after_launch INTEGER,
     FOREIGN KEY (wallet) REFERENCES wallets(address)
 );
-
--- Tokens, patterns, clusters, watchlist tables...
--- (See storage.py for complete schema)
 ```
 
-**Key changes**:
-- Added `action` column (BUY/SELL) - tracks sell behavior
-- Added `strategic_exit_count`, `avg_hold_time_hours` (sell metrics)
-- NO `value_eth` column (we don't track volume, saves BigQuery costs)
-- NO `win_rate` column (we don't calculate profitability)
-- Added `launch_timestamp`, `launch_block` (from BigQuery)
-- Added timing columns for pattern detection
+**Note**: Database currently stores trades for analysis but final results are exported to CSV for flexibility.
 
 ---
 
-## BigQuery Queries (UPDATED with LP Creation Fix)
+## BigQuery Queries (Simplified - No LP Detection)
 
-### 1. token_launches.sql (NEW - CRITICAL - Must run FIRST)
+### 1. first_buyers_simple.sql
 
-**Purpose**: Find ACTUAL LP creation timestamps for accurate buy ranking
-
-**Why critical**: First token transfer is minting event, NOT trading launch. This query finds when liquidity was actually added.
+**Purpose**: Find wallets that were early buyers on 4x+ tokens
 
 **How it works**:
-```sql
--- Method 1: Detect LP creation events from DEX factories
-uniswap_v2_pair_creations AS (
-    SELECT token0, token1, pair_address, block_timestamp AS launch_timestamp
-    FROM logs
-    WHERE address = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'  -- Uniswap V2 Factory
-      AND topics[0] = '0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9'  -- PairCreated event
-)
+- Uses first token transfer as launch proxy (not actual LP creation)
+- Ranks buyers from first transfer timestamp
+- Expands to top 100 buyers per token (catches stealth insiders)
 
--- Method 2: Fallback to first liquidity transfer to DEX routers
-first_liquidity_add AS (
-    SELECT token_address, MIN(block_timestamp) AS launch_timestamp
+```sql
+-- Simplified structure
+WITH token_first_transfer AS (
+    -- Get first transfer timestamp for each token (proxy for launch)
+    SELECT token_address, MIN(block_timestamp) AS first_transfer_time
     FROM token_transfers
-    WHERE to_address IN ('0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', ...)  -- DEX routers
-      AND value >= 1e18  -- At least 1 token
+    WHERE token_address IN @successful_token_addresses
     GROUP BY token_address
-)
-```
-
-**Returns**: `token_address`, `launch_timestamp`, `launch_block`, `dex_name`, `detection_method`
-
-**Parameters**:
-- `@successful_token_addresses`: Token list from DEXScreener
-- `@lookback_days`: Days to look back (default 180)
-
----
-
-### 2. first_buyers.sql (UPDATED with actual LP creation data)
-
-**Purpose**: Find wallets that were early buyers on 10x tokens
-
-**CRITICAL UPDATE**: Now uses ACTUAL LP creation timestamps from token_launches.sql
-
-**Key features**:
-- Ranks buyers FROM LP CREATION (not from first transfer)
-- Expanded from rank 1-50 to rank 1-100 (catches stealth insiders)
-- Only includes buys AFTER LP creation
-
-```sql
--- Simplified structure (UPDATED)
-WITH actual_token_launches AS (
-    -- CRITICAL: Get ACTUAL LP creation timestamps from token_launches.sql
-    SELECT token_address, launch_timestamp, launch_block
-    FROM UNNEST(@token_launch_data) AS token_launch_data
-),
-
-first_buy_per_wallet AS (
-    -- Get first buy AFTER LP creation
-    SELECT wallet, token_address, MIN(block_timestamp) AS first_buy
-    FROM token_transfers tt
-    INNER JOIN actual_token_launches atl ON tt.token_address = atl.token_address
-    WHERE tt.block_timestamp >= atl.launch_timestamp  -- CRITICAL FIX
-    GROUP BY wallet, token_address
 ),
 
 ranked_buyers AS (
-    -- Rank buyers from LP CREATION (not from minting)
-    SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY token_address
-        ORDER BY first_buy ASC
-    ) AS buy_rank
+    -- Rank buyers from first transfer
+    SELECT wallet, token_address, buy_rank
     FROM first_buy_per_wallet
+    ORDER BY first_buy_time ASC
 )
 
 SELECT wallet, COUNT(*) AS early_hit_count
 FROM ranked_buyers
-WHERE buy_rank <= 100  -- First 100 buyers (EXPANDED from 50)
+WHERE buy_rank <= 100  -- First 100 buyers
 GROUP BY wallet
 HAVING early_hit_count >= 5  -- At least 5 early hits
 ```
 
 **Parameters**:
-- `@successful_token_addresses`: Token list from DEXScreener
-- `@token_launch_data`: Launch data from token_launches.sql (CRITICAL)
-- `@lookback_days`: Days to look back
+- `@successful_token_addresses`: Token list from Dune/GeckoTerminal
+- `@lookback_days`: Days to look back (default 180)
 - `@min_early_hits`: Minimum early hits (default 5)
 
 ---
 
-### 3. wallet_history.sql (UPDATED with LP creation data + whale filter)
+### 2. wallet_history_simple.sql
 
-**Purpose**: Get detailed buy transaction history for candidates
+**Purpose**: Get detailed trade history for pattern detection
 
-**CRITICAL UPDATES**:
-1. Uses ACTUAL LP creation timestamps for accurate timing
-2. Filters to minimum whale buy value (>= 0.1 ETH)
+**CRITICAL**: No traces join (expensive). No ETH value filtering.
 
 ```sql
 -- Returns: wallet, token_address, buy_rank, timestamp,
---          is_same_block_buy, seconds_after_launch, eth_value, etc.
+--          is_same_block_buy, seconds_after_launch, etc.
 
-WITH actual_token_launches AS (
-    -- Get ACTUAL LP creation timestamps
-    SELECT token_address, launch_timestamp, launch_block
-    FROM UNNEST(@token_launch_data) AS token_launch_data
-),
-
-wallet_buys_with_eth_value AS (
-    -- Join with traces to get ETH value spent
-    SELECT wb.*, CAST(tr.value AS FLOAT64) / 1e18 AS eth_value
-    FROM wallet_buys wb
-    LEFT JOIN traces tr ON wb.tx_hash = tr.transaction_hash
-    WHERE CAST(tr.value AS FLOAT64) / 1e18 >= @min_whale_buy_eth  -- WHALE FILTER
+WITH wallet_buys AS (
+    -- Get all buys (FILTER BY TOKEN FIRST - reduces scan cost)
+    SELECT tt.to_address AS wallet, tt.token_address, tt.timestamp, ...
+    FROM token_transfers tt
+    WHERE tt.token_address IN @successful_token_addresses  -- CRITICAL
+      AND tt.to_address IN @wallet_addresses
 ),
 
 ranked_buys AS (
-    -- Calculate buy rank from ACTUAL LP creation
-    SELECT wb.*,
-           atl.launch_timestamp,
-           TIMESTAMP_DIFF(wb.timestamp, atl.launch_timestamp, SECOND) AS seconds_after_launch,
-           ROW_NUMBER() OVER (
-               PARTITION BY wb.token_address
-               ORDER BY wb.timestamp ASC
-           ) AS buy_rank
-    FROM wallet_buys_with_eth_value wb
-    INNER JOIN actual_token_launches atl ON wb.token_address = atl.token_address
+    -- Calculate buy rank from first transfer
+    SELECT wb.*, ROW_NUMBER() OVER (
+        PARTITION BY wb.token_address
+        ORDER BY wb.timestamp ASC
+    ) AS buy_rank
+    FROM wallet_buys wb
 )
 ```
 
+**Cost**: ~$7-8 for 97 wallets (removed expensive traces table join)
+
 **Parameters**:
+- `@successful_token_addresses`: Token list (CRITICAL - reduces scan)
 - `@wallet_addresses`: Candidate wallets
-- `@token_launch_data`: Launch data from token_launches.sql (CRITICAL)
 - `@lookback_days`: Days to look back
-- `@min_whale_buy_eth`: Minimum ETH value (default 0.1) - WHALE FILTER
+- `@min_whale_buy_eth`: Disabled (0.0) - no ETH filtering
 
 ---
 
-### 3. wallet_activity.sql (NEW - CRITICAL)
+### 3. wallet_activity.sql
 
 **Purpose**: Get TOTAL wallet activity to calculate precision rate
 
@@ -600,146 +380,172 @@ ranked_buys AS (
 -- precision_rate = successful_tokens / total_unique_tokens
 --
 -- Example:
--- - Bot A: 5 hits / 10 total tokens = 50% precision (SIGNAL)
--- - Bot B: 5 hits / 5000 total tokens = 0.1% precision (NOISE - gets 80% penalty)
+-- - Wallet A: 6 hits / 36 total tokens = 16.7% precision (SIGNAL)
+-- - Wallet B: 5 hits / 5000 total tokens = 0.1% precision (NOISE - 80% penalty)
 ```
 
-**Impact**: Eliminates ~90% of false positives by downgrading mindless bots
-
-### 4. wallet_sells.sql (NEW)
-
-**Purpose**: Detect sell behavior to identify strategic dumpers
-
-**Why important**: Distinguishes predators (dumpers) from believers (holders)
-
-```sql
--- For each candidate wallet on successful tokens:
--- Returns: strategic_exit_count, avg_hold_time_hours, avg_sell_percentage
---
--- Strategic exit = sold >50% of position
---
--- Example:
--- - Wallet A: 5 early buys, 5 strategic exits = PREDATOR (Severity 5)
--- - Wallet B: 5 early buys, 0 exits (still holding) = HOLDER (no penalty)
-```
-
-**Interpretation**:
-- Quick flips (< 48h hold) = Likely insider (Severity 5)
-- Longer holds but still exiting = Trader (Severity 4)
-- No exits = Community member/bag holder (no pattern triggered)
+**Impact**: Eliminates ~74% of false positives by downgrading spray-and-pray bots
 
 ---
 
-## DEXScreener API Client (UPDATED with Multi-Timeframe Verification)
+## GeckoTerminal API Client (Backup Token Discovery)
 
 ```python
-# src/data/dexscreener_client.py - UPDATED
+# src/data/geckoterminal_client.py
 
-from src.data.dexscreener_client import DEXScreenerClient
+from src.data.geckoterminal_client import GeckoTerminalClient
 
-client = DEXScreenerClient()
+client = GeckoTerminalClient()
 
-# RECOMMENDED: Get tokens with SUSTAINED 10x gains (multi-timeframe verification)
-# Filters out pump-and-dumps that don't sustain gains
-tokens = client.find_sustained_10x_tokens(chain="ethereum")
+# Get ALL tokens with 4x+ gains (including pump-and-dumps)
+tokens = client.find_4x_tokens(
+    network="eth",
+    min_return_multiple=4.0
+)
 
 # Returns DataFrame with:
 # - token_address
-# - symbol
-# - price_change_1h (must be >= 1000%)
-# - price_change_6h (must be >= 800%)
-# - price_change_24h (must be >= 500%)
-# - liquidity_usd
-# - volume_24h
-# - verification_status: "sustained_10x"
-
-# Legacy method (simple 24h snapshot, NOT recommended):
-tokens_legacy = client.find_10x_tokens(
-    chain="ethereum",
-    min_return_multiple=10.0
-)
+# - symbol, name
+# - price_change_24h (>= 300% = 4x gain)
+# - liquidity_usd, volume_24h
+# - pair_created_at
 ```
 
-**Multi-Timeframe Requirements**:
-- 1h: >= 1000% (10x in 1 hour - strong recent momentum)
-- 6h: >= 800% (8x in 6 hours - sustained over hours)
-- 24h: >= 500% (5x in 24 hours - proven stability)
+**Why this works**:
+- Pump-and-dump insiders are who we're hunting
+- Activity density filtering eliminates spray-and-pray bots
+- Precision rate separates signal from noise
 
-**How it works**:
-1. Fetch top gainers from DEXScreener
-2. For each token, get detailed info with multi-timeframe price changes
-3. Only include tokens that meet ALL three thresholds
-4. Returns intersection of sustained tokens
+**API Details**:
+- FREE GeckoTerminal API, no authentication required
+- 30 calls per minute rate limit
 
-**Impact**:
-- Filters out pump-and-dumps that spike and crash
-- Only includes tokens with proven sustained gains
-- Reduces false positives from rug-pulls
-- Higher quality token list for analysis
-
-**Note**: Uses FREE DEXScreener API, no authentication required
+**Currently**: Using Dune Analytics for token discovery (365-day lookback)
 
 ---
 
 ## Execution Scripts
 
-### 01_fetch_historical.py (UPDATED with LP Creation Fix)
+### 01_fetch_historical.py
 
-**Complete workflow** (UPDATED with 4 critical fixes):
+**Complete workflow**:
 
 1. Initialize DuckDB
 2. Connect to BigQuery
-3. **Call DEXScreener API** → Get SUSTAINED 10x tokens (multi-timeframe verification)
-4. Save successful_tokens.csv
-5. **Execute token_launches.sql** → Get ACTUAL LP creation timestamps (CRITICAL NEW STEP)
-6. Save token_launches.parquet
-7. Execute first_buyers.sql → Get whale candidates (rank 1-100, FROM LP creation)
-   - Uses @token_launch_data parameter from step 5
-8. Execute wallet_history.sql → Get trade details (with whale buy filter >= 0.1 ETH)
-   - Uses @token_launch_data parameter from step 5
-   - Uses @min_whale_buy_eth parameter (0.1 ETH)
-9. **Execute wallet_activity.sql** → Get total activity (CRITICAL)
-10. **Execute wallet_sells.sql** → Get sell behavior
-11. Load all data into DuckDB
+3. Load `data/successful_tokens.csv` (from Dune or GeckoTerminal)
+4. Execute `first_buyers_simple.sql` → Get whale candidates (rank 1-100)
+5. Execute `wallet_history_simple.sql` → Get trade details
+6. Execute `wallet_activity.sql` → Get total activity (CRITICAL for precision)
+7. Load all data into DuckDB
+8. Export parquet files
 
-**Cost**: ~$0.75-1.50 (includes all critical fixes)
+**Cost**: ~$8-10 for 97 wallets (500 tokens, 365-day lookback)
 
-**Query cost breakdown** (UPDATED):
-- token_launches.sql: $0.10-0.25 (NEW - CRITICAL)
-- first_buyers.sql: $0.25-0.50 (uses LP creation data)
-- wallet_history.sql: $0.10-0.20 (whale filter reduces cost)
-- wallet_activity.sql: $0.25-0.50
-- wallet_sells.sql: $0.25-0.50
-
-**Workflow order is CRITICAL**:
-- token_launches.sql MUST run before first_buyers.sql and wallet_history.sql
-- Launch data is passed as @token_launch_data parameter
+**Query cost breakdown**:
+- first_buyers_simple.sql: ~$0.20
+- wallet_history_simple.sql: ~$7.50
+- wallet_activity.sql: ~$2.00
 
 ### 02_analyze_wallets.py
 
-**Workflow** (UPDATED):
+**Workflow**:
 
 1. Load candidates from DuckDB
-2. **Load activity density data** (wallet_activity.parquet) - NEW
-3. **Load sell behavior data** (wallet_sells.parquet) - NEW
-4. For each wallet:
+2. Load activity density data (wallet_activity.parquet)
+3. For each wallet:
    - Calculate basic metrics (wallet_metrics.py)
    - Analyze early buying (early_buyer.py)
-   - **Calculate activity density → precision_rate** (NEW - CRITICAL)
-   - **Add sell behavior metrics** (strategic_exit_count, avg_hold_time) - NEW
-   - Detect patterns (patterns.py) - now includes STRATEGIC_DUMPER + context-aware MEV
-   - Calculate whale score (scorer.py) - **with precision penalty applied**
-5. Update database with scores
-6. Add high scorers (≥60) to watchlist
-7. Generate whale_report.csv with new metrics
+   - Calculate precision_rate (early_hits / total_unique_tokens)
+   - Detect patterns (patterns.py) - CONSISTENT_EARLY_BUYER, LIQUIDITY_SNIPER
+   - Calculate whale score (scorer.py) - with precision penalty applied
+4. Export to `data/whale_report.csv` (temporary - gets merged into master)
+5. Master list auto-merge logic runs
 
-**Output includes**:
+**Output**:
 - Whale score (with precision penalty)
-- Early hits
-- Avg buy rank
-- **Precision rate** (NEW)
-- **Strategic exit count** (NEW)
-- Detected patterns
+- Early hits, avg buy rank
+- Precision rate
+- Pattern count and names
+- Base score and score penalty
+
+---
+
+## Configuration
+
+```python
+# config/settings.py - KEY SETTINGS
+
+# Detection Thresholds
+MIN_EARLY_HITS = 5           # Min early hits to be considered
+FIRST_N_BUYERS = 100         # First N buyers are "early"
+MIN_TOKEN_RETURN_MULTIPLE = 4.0  # 4x return requirement (lowered from 10x)
+LOOKBACK_DAYS = 180          # 6 months of data
+MIN_WHALE_BUY_ETH = 0.0      # Disabled (was 0.1) - no ETH filtering
+
+# Pattern Detection
+LIQUIDITY_SNIPER_MIN_HITS = 3     # Min same-block buys
+FRESH_WALLET_DAYS = 7             # New wallet threshold (disabled)
+CLUSTER_MIN_SIZE = 5              # Min wallets in cluster (disabled)
+EARLY_BUYER_AVG_RANK_THRESHOLD = 20  # Avg rank for pattern
+STRATEGIC_DUMPER_MIN_EXITS = 3    # Min strategic exits (disabled)
+
+# Whale Score (logarithmic scoring)
+WHALE_SCORE_WATCHLIST = 60.0  # Watchlist threshold
+WHALE_SCORE_ALERT = 80.0      # High-priority threshold
+
+# BigQuery Cost Control
+BIGQUERY_WARN_THRESHOLD_GB = 10.0  # Warn if >10 GB
+BIGQUERY_COST_PER_TB = 5.0         # $5 per TB
+```
+
+---
+
+## Environment Variables
+
+```bash
+# .env (required)
+BIGQUERY_PROJECT=your_gcp_project_id
+GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
+
+# Optional (for future features)
+HELIUS_API_KEY=your_helius_key  # For Solana analysis
+```
+
+---
+
+## Quick Start
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env with your BigQuery credentials
+
+# 3. Get token list (option A: Dune Analytics)
+# - Run Dune query: https://dune.com/queries/...
+# - Export to CSV as data/successful_tokens.csv
+
+# 3. Get token list (option B: GeckoTerminal API)
+python -c "
+from src.data.geckoterminal_client import GeckoTerminalClient
+client = GeckoTerminalClient()
+tokens = client.find_4x_tokens('eth', min_return_multiple=4.0)
+tokens.to_csv('data/successful_tokens.csv', index=False)
+"
+
+# 4. Run pipeline
+python scripts/01_fetch_historical.py  # BigQuery → DuckDB (~$8-10)
+python scripts/02_analyze_wallets.py   # Analyze & score
+
+# 5. Check results
+# - data/master_whale_list.csv (ALL wallets - 97 currently)
+# - data/watchlist.csv (top wallets - 7 currently)
+
+# 6. Regenerate watchlist anytime
+python create_watchlist.py
+```
 
 ---
 
@@ -762,10 +568,6 @@ def process(df: pd.DataFrame):
     return df
 ```
 
-Already implemented in:
-- `wallet_metrics.py`
-- `early_buyer.py`
-
 ### 2. BigQuery Cost Control
 
 **ALWAYS estimate before executing**:
@@ -780,101 +582,87 @@ estimate = bq.estimate_query_cost(sql)
 print(f"Will scan {estimate['gb_scanned']:.2f} GB (${estimate['cost_usd']:.4f})")
 
 # Only execute if acceptable
-if estimate['cost_usd'] < 0.10:
+if estimate['cost_usd'] < 10.00:
     results = bq.query(sql)
 ```
 
 ### 3. No Unnecessary Features
 
 **Removed** to reduce complexity and cost:
+- LP creation detection (token_launches.sql) - too complex, 24-48h lag issues
+- ETH value tracking (traces table join) - too expensive ($192 → $8 savings)
 - Win rate calculation (impossible to do accurately)
-- Volume tracking (value_eth) - saves 50% on BigQuery costs
-- Sell tracking (we only care about buys)
-- token_performance.sql (replaced by DEXScreener API)
+- Sell tracking (wallet_sells.sql) - requires additional data sources
 
-### 4. Pattern Detection Focus
-
-Track **THAT** they were early, not **HOW MUCH** they spent:
-- Early hit count
-- Average buy rank
-- Same-block buys
-- Timing patterns
-- Wallet clustering
+**What remains**:
+- Buy rank from first transfer (simple, cheap)
+- Pattern detection (CONSISTENT_EARLY_BUYER, LIQUIDITY_SNIPER)
+- Precision filtering (eliminates 74% of false positives)
+- Logarithmic scoring (mathematically justified)
 
 ---
 
-## Configuration (UPDATED)
+## Cost Breakdown
 
-```python
-# config/settings.py - KEY SETTINGS (UPDATED with critical fixes)
+| Component | Cost | Notes |
+|-----------|------|-------|
+| GeckoTerminal API | FREE | No authentication required |
+| Dune Analytics | FREE | Manual export |
+| BigQuery - first_buyers_simple.sql | $0.20 | ~40 GB |
+| BigQuery - wallet_history_simple.sql | $7.50 | ~1.5 TB (no traces join) |
+| BigQuery - wallet_activity.sql | $2.00 | ~400 GB |
+| DuckDB | FREE | Local storage |
+| **Total per run** | ~$9.70 | 500 tokens, 97 wallets, 365-day lookback |
 
-# Detection Thresholds
-MIN_EARLY_HITS = 5           # Min early hits to be considered
-FIRST_N_BUYERS = 100         # First N buyers are "early" (EXPANDED from 50)
-MIN_TOKEN_RETURN_MULTIPLE = 10.0  # 10x return requirement
-LOOKBACK_DAYS = 180          # 6 months of data
-MIN_WHALE_BUY_ETH = 0.1      # Min ETH buy value (NEW - filters small buyers/bots)
-
-# Pattern Detection
-LIQUIDITY_SNIPER_MIN_HITS = 3     # Min same-block buys
-FRESH_WALLET_DAYS = 7             # New wallet threshold
-CLUSTER_MIN_SIZE = 5              # Min wallets in cluster
-EARLY_BUYER_AVG_RANK_THRESHOLD = 20  # Avg rank for pattern
-STRATEGIC_DUMPER_MIN_EXITS = 3    # Min strategic exits
-
-# Whale Score (UPDATED with logarithmic scoring)
-WHALE_SCORE_WATCHLIST = 60.0  # Watchlist threshold
-WHALE_SCORE_ALERT = 80.0      # High-priority threshold
-# NOTE: Scoring now uses logarithmic functions, not arbitrary thresholds
-
-# BigQuery Cost Control
-BIGQUERY_WARN_THRESHOLD_GB = 10.0  # Warn if >10 GB
-BIGQUERY_COST_PER_TB = 5.0         # $5 per TB
-```
-
-**Key changes**:
-- Added `MIN_WHALE_BUY_ETH = 0.1` - filters out small buyers and spray-and-pray bots
-- Expanded `FIRST_N_BUYERS` from 50 to 100 - catches stealth insiders who wait past rank 50
-- Scoring thresholds unchanged, but implementation now uses logarithmic scaling
+**Cost optimization**:
+- Removed traces table join ($192 → $8 savings)
+- Filter by token FIRST in wallet_history_simple.sql (critical)
+- No LP detection (complex + expensive)
 
 ---
 
-## Environment Variables
+## Current Analysis Results (Dec 2024)
 
-```bash
-# .env (required)
-BIGQUERY_PROJECT=your_gcp_project_id
-GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
+**Data source**: Dune Analytics (500 tokens, 365-day lookback)
+**Wallets analyzed**: 97
+**Pattern detection**: ENABLED
 
-# Optional (for future features)
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
+### Score Distribution
+- **70-79**: 1 wallet (TOP WHALE)
+- **50-59**: 2 wallets
+- **40-49**: 4 wallets (watchlist tier 2)
+- **30-39**: 8 wallets
+- **<30**: 82 wallets
+
+### Top Whale
 ```
+0xbde7ad38a4414e3e30a93dc39e2daf86a3b01653
+Score: 72.7/100
+Early Hits: 6
+Avg Buy Rank: 4.1
+Precision: 16.7% (6/36 tokens)
+Patterns: CONSISTENT_EARLY_BUYER, LIQUIDITY_SNIPER
+```
+
+**Why this scores high**:
+- **TOP 5 buyer** on average (rank 4.1)
+- **High precision** (16.7% - no penalty)
+- **2 patterns detected** (+8-10 points)
+- Clean signal, not spray-and-pray bot
 
 ---
 
-## Quick Start
+## Future Enhancements (Not Yet Implemented)
 
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+- Solana integration (Helius API)
+- Sell behavior tracking (strategic dumper detection)
+- Wallet clustering (Sybil attack detection)
+- Fresh wallet detection (new wallet + immediate sniping)
+- Real-time monitoring
+- Telegram alerts
+- Web dashboard
 
-# 2. Configure environment
-cp .env.example .env
-# Edit .env with your BigQuery credentials
-
-# 3. Run pipeline
-python scripts/01_fetch_historical.py  # DEXScreener → BigQuery (4 queries)
-python scripts/02_analyze_wallets.py   # Analyze & score (with precision filtering)
-
-# 4. Check results
-# - data/successful_tokens.csv (10x tokens from DEXScreener)
-# - data/first_buyers.parquet (whale candidates, rank 1-100)
-# - data/wallet_activity.parquet (total activity for precision calculation) - NEW
-# - data/wallet_sells.parquet (sell behavior) - NEW
-# - data/whale_report.csv (scored whales with precision rate)
-# - data/whales.db (DuckDB with all data)
-```
+**Current Status**: MVP focused on Ethereum historical analysis with master list tracking
 
 ---
 
@@ -883,96 +671,23 @@ python scripts/02_analyze_wallets.py   # Analyze & score (with precision filteri
 1. **Never calculate win rates** - Pattern matching only
 2. **Always use DuckDB** for local queries - No PostgreSQL
 3. **Always estimate BigQuery costs** before running queries
-4. **Use DEXScreener for token identification** - Don't try to find 10x tokens in BigQuery
+4. **Filter by token FIRST** in wallet queries - Critical for cost control
 5. **Copy DataFrames** before mutation
 6. **Track early buying patterns** - Not profitability
-7. **Keep it simple** - Remove unused features
-8. **Parquet over CSV** - Faster and smaller
-9. **No unnecessary clutter** - Archive old experiments
-
----
-
-## Cost Breakdown
-
-| Component | Cost | Notes |
-|-----------|------|-------|
-| DEXScreener API | FREE | No authentication required |
-| BigQuery - first_buyers.sql | $0.25-0.50 | ~50-100 GB (rank 50→100) |
-| BigQuery - wallet_activity.sql | $0.25-0.50 | NEW - total activity (CRITICAL) |
-| BigQuery - wallet_sells.sql | $0.25-0.50 | NEW - sell behavior |
-| BigQuery - wallet_history.sql | $0.10-0.25 | Same as before |
-| DuckDB | FREE | Local storage |
-| **Total per run** | ~$0.75-1.50 | 3x increase, 90% fewer false positives |
-
-**Cost increase justified**: The 3x cost increase ($0.50 → $1.50) delivers:
-- 90% reduction in false positives (activity density filtering)
-- Stealth insider detection (rank 51-100)
-- Predator identification (strategic dumper pattern)
-- Context-aware MEV filtering
-
----
-
-## Future Enhancements (Not Yet Implemented)
-
-- Solana integration (Helius API)
-- Real-time monitoring
-- Telegram alerts
-- Web dashboard
-- Backtesting framework
-- Copy trading automation
-
-**Current Status**: MVP focused on Ethereum/Base historical analysis
-
----
-
-## Documentation Files
-
-- **CLAUDE.md** (this file): Technical reference for Claude Code
-- **README.md**: User-facing setup guide
-- **WORKFLOW.md**: Complete pipeline documentation with diagrams
-- **requirements.txt**: Python dependencies
-- **.env.example**: Environment variable template
-
----
-
-## Critical Architectural Fixes Applied
-
-The system has been upgraded with **4 critical fixes** to eliminate false positives and improve detection accuracy:
-
-### Fix #1: Selling Behavior Tracking (Strategic Dumper Pattern)
-- **New SQL query**: `wallet_sells.sql`
-- **New pattern**: STRATEGIC_DUMPER (Severity 4-5)
-- **Impact**: Distinguishes predators (dumpers) from believers (holders)
-- **Metric**: `strategic_exit_count` (# of times wallet sold >50% of position)
-
-### Fix #2: Flexible Buy Rank Scoring (1-100)
-- **Updated query**: `first_buyers.sql` (rank 50 → 100)
-- **Weighted scoring**: No hard cutoffs (ranks 51-100 get partial credit)
-- **Impact**: Catches "stealth insiders" who wait for bot-war to settle
-
-### Fix #3: Activity Density Filtering ⭐ MOST CRITICAL
-- **New SQL query**: `wallet_activity.sql`
-- **New metric**: `precision_rate = early_hits / total_unique_tokens`
-- **Penalty tiers**: 80%, 50%, 30% score reduction for spray-and-pray bots
-- **Impact**: Eliminates ~90% of false positives
-
-### Fix #4: Context-Aware MEV Bot Detection
-- **Updated pattern**: LIQUIDITY_SNIPER (now context-aware)
-- **Logic**: Fresh wallet + sniping = Severity 5 (insider), Old wallet + sniping = Severity 2 (MEV bot)
-- **Impact**: Downgrades 80% of MEV patterns to low severity
-
-**See FIXES.md for complete implementation details**
+7. **ALL wallets go to master list** - User decides what matters
+8. **Keep it simple** - Remove unused features
+9. **Parquet for exports, CSV for master list** - Best of both worlds
+10. **No unnecessary clutter** - Delete temporary files
 
 ---
 
 ## Key Takeaways
 
 ✅ **Pattern detection, not profitability**
-✅ **DEXScreener → BigQuery → Activity Filtering pipeline**
+✅ **Dune/GeckoTerminal → BigQuery → Master List pipeline**
 ✅ **Precision rate filtering (CRITICAL for eliminating false positives)**
-✅ **5 patterns (including Strategic Dumper), 0-100 score with precision penalty**
-✅ **No win rates, no volume tracking**
-✅ **FREE token identification via DEXScreener**
-✅ **Expanded buy rank (1-100 catches stealth insiders)**
-✅ **Context-aware pattern detection (MEV vs insider)**
-✅ **~$0.75-1.50 per run (3x cost, 90% fewer false positives)**
+✅ **2 active patterns (CONSISTENT_EARLY_BUYER, LIQUIDITY_SNIPER), 0-100 score**
+✅ **No win rates, no volume tracking, no LP detection**
+✅ **ALL wallets tracked in master_whale_list.csv**
+✅ **~$10 per run (500 tokens, 97 wallets, 365 days)**
+✅ **Top whale: 72.7 points, 16.7% precision, rank 4.1 avg**

@@ -24,18 +24,20 @@ class DEXScreenerClient:
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json"})
 
-    def get_top_gainers(
+    def search_pairs(
         self,
-        chain: str = "ethereum",
+        query: str = "",
         min_liquidity_usd: float = 50000,
         min_volume_24h: float = 10000,
         limit: int = 100,
     ) -> List[Dict]:
         """
-        Get top gaining tokens on a specific chain.
+        Search for trading pairs.
+        NOTE: DEXScreener free API has limited search capabilities.
+        This method uses the search endpoint which may have rate limits.
 
         Args:
-            chain: blockchain (ethereum, base, bsc, etc.)
+            query: Search query (token symbol/address)
             min_liquidity_usd: Minimum liquidity to filter scams
             min_volume_24h: Minimum 24h volume
             limit: Max tokens to return
@@ -43,7 +45,8 @@ class DEXScreenerClient:
         Returns:
             List of token data dicts
         """
-        url = f"{self.BASE_URL}/dex/tokens/trending/{chain}"
+        # DEXScreener search endpoint
+        url = f"{self.BASE_URL}/dex/search/?q={query}"
 
         try:
             response = self.session.get(url, timeout=10)
@@ -76,7 +79,7 @@ class DEXScreenerClient:
             return tokens
 
         except Exception as e:
-            print(f"Error fetching top gainers: {e}")
+            print(f"Error searching pairs: {e}")
             return []
 
     def get_token_info(self, token_address: str, chain: str = "ethereum") -> Optional[Dict]:
@@ -127,63 +130,70 @@ class DEXScreenerClient:
         self,
         chain: str = "ethereum",
         days_back: int = 180,
-        min_return_multiple: float = 10.0,
+        min_return_multiple: float = 4.0,
         batch_delay: float = 0.3,
     ) -> pd.DataFrame:
         """
-        Find tokens that achieved 10x+ returns in the specified timeframe.
+        Find tokens that achieved 4x+ returns in the specified timeframe.
 
         Strategy:
-        1. Get trending/top tokens from DEXScreener
-        2. Check their price history
-        3. Filter for tokens that did >=10x from their low
+        1. Search for tokens using DEXScreener API
+        2. Check their price changes
+        3. Filter for tokens that did >=4x (300%+ gain)
 
         Args:
             chain: Blockchain to search
             days_back: Look back period in days
-            min_return_multiple: Minimum return (10.0 = 10x)
+            min_return_multiple: Minimum return (4.0 = 4x)
             batch_delay: Delay between API calls (rate limiting)
 
         Returns:
             DataFrame with successful token addresses
         """
         print(f"Searching for {min_return_multiple}x tokens on {chain}...")
-
-        # Get top gainers
-        print("Fetching top gainers...")
-        top_tokens = self.get_top_gainers(chain=chain, limit=100)
+        print()
+        print("NOTE: Using DEXScreener search API with broad queries.")
+        print("This will find recently pumped tokens on Ethereum.")
+        print()
 
         successful_tokens = []
+        search_queries = ["PEPE", "SHIB", "DOGE", "WOJAK", "MEME", "AI", "TRUMP", "FROG", "CAT", "DOG"]
 
-        for i, token in enumerate(top_tokens):
-            token_address = token["token_address"]
+        for query in search_queries:
+            print(f"  Searching for '{query}' tokens...")
+            try:
+                pairs = self.search_pairs(query=query, min_liquidity_usd=10000, min_volume_24h=5000, limit=20)
 
-            # Check if price change indicates potential 10x
-            # DEXScreener doesn't give historical data directly,
-            # but 24h change can indicate recent pumps
-            price_change_24h = token.get("price_change_24h", 0)
+                for token in pairs:
+                    price_change_24h = token.get("price_change_24h", 0)
 
-            # If 24h change is >500%, it might have done 10x recently
-            if price_change_24h >= 500:  # 5x in 24h suggests possible 10x over longer period
-                successful_tokens.append(
-                    {
-                        "token_address": token_address,
-                        "symbol": token["symbol"],
-                        "name": token["name"],
-                        "price_change_24h": price_change_24h,
-                        "liquidity_usd": token["liquidity_usd"],
-                        "volume_24h": token["volume_24h"],
-                        "pair_created_at": token["pair_created_at"],
-                        "estimated_return": price_change_24h / 100,
-                    }
-                )
+                    # Filter for 4x+ gainers (300%+ = 4x gain)
+                    if price_change_24h >= 300:
+                        # Check if we already have this token
+                        if not any(t["token_address"] == token["token_address"] for t in successful_tokens):
+                            successful_tokens.append({
+                                "token_address": token["token_address"],
+                                "symbol": token["symbol"],
+                                "name": token["name"],
+                                "price_change_24h": price_change_24h,
+                                "liquidity_usd": token["liquidity_usd"],
+                                "volume_24h": token["volume_24h"],
+                                "pair_created_at": token["pair_created_at"],
+                                "estimated_return": price_change_24h / 100,
+                            })
 
-            # Rate limiting
-            if (i + 1) % 10 == 0:
-                print(f"  Processed {i+1}/{len(top_tokens)} tokens...")
-                time.sleep(batch_delay)
+                time.sleep(batch_delay)  # Rate limiting
 
-        print(f"Found {len(successful_tokens)} potential 10x+ tokens")
+            except Exception as e:
+                print(f"    Error searching '{query}': {e}")
+                continue
+
+        print(f"\nFound {len(successful_tokens)} potential 4x+ tokens")
+
+        if len(successful_tokens) == 0:
+            print("\nWARNING: No tokens found!")
+            print("You can manually add token addresses to data/successful_tokens.csv")
+            print("Format: token_address,symbol,name,price_change_24h,liquidity_usd,volume_24h,pair_created_at,estimated_return")
 
         return pd.DataFrame(successful_tokens)
 

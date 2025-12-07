@@ -47,6 +47,9 @@ def calculate_wallet_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
 
     # Calculate wallet age
     if pd.notna(first_trade_date):
+        # Convert to timezone-aware if needed
+        if first_trade_date.tzinfo is None:
+            first_trade_date = first_trade_date.tz_localize('UTC')
         wallet_age_days = (datetime.now(timezone.utc) - first_trade_date).days
     else:
         wallet_age_days = 0

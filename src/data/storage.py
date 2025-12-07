@@ -142,7 +142,7 @@ def insert_wallet(
         INSERT INTO wallets (address, chain, tags)
         VALUES (?, ?, ?)
         ON CONFLICT (address) DO UPDATE SET
-            updated_at = CURRENT_TIMESTAMP
+            updated_at = NOW()
     """,
         [address, chain, tags],
     )
@@ -240,7 +240,7 @@ def update_whale_score(
         SET whale_score = ?,
             early_hit_count = ?,
             avg_buy_rank = ?,
-            updated_at = CURRENT_TIMESTAMP
+            updated_at = NOW()
         WHERE address = ?
     """,
         [score, early_hit_count, avg_buy_rank, wallet_address],

@@ -92,7 +92,7 @@ first_liquidity_add AS (
         MIN(tt.block_timestamp) AS launch_timestamp,
         MIN(tt.block_number) AS launch_block,
         'FirstLiquidityAdd' AS dex_name,
-        NULL AS pair_address
+        CAST(NULL AS STRING) AS pair_address
     FROM `bigquery-public-data.crypto_ethereum.token_transfers` tt
     INNER JOIN token_list tl ON tt.token_address = tl.token_address
     WHERE

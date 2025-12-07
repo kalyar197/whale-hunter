@@ -54,7 +54,7 @@ def main():
     # Connect to database
     db_path = config.DB_PATH
     if not Path(db_path).exists():
-        print(f"❌ Database not found: {db_path}")
+        print(f"ERROR: Database not found: {db_path}")
         print("Please run scripts/01_fetch_historical.py first")
         return
 
@@ -91,9 +91,9 @@ def main():
                 'total_unique_tokens': row['total_unique_tokens'],
                 'total_tx_count': row['total_tx_count']
             }
-        print(f"✓ Loaded activity data for {len(activity_data)} wallets")
+        print(f"OK: Loaded activity data for {len(activity_data)} wallets")
     else:
-        print("⚠️  No activity density data found. Precision filtering will be skipped.")
+        print("WARNING:  No activity density data found. Precision filtering will be skipped.")
         print("   Run 01_fetch_historical.py with wallet_activity.sql to enable this feature.")
     print()
 
@@ -109,9 +109,9 @@ def main():
                 'strategic_exit_count': row['strategic_exit_count'],
                 'avg_hold_time_hours': row['avg_hold_time_hours']
             }
-        print(f"✓ Loaded sell data for {len(sells_data)} wallets")
+        print(f"OK: Loaded sell data for {len(sells_data)} wallets")
     else:
-        print("⚠️  No sell behavior data found. Strategic dumper detection will be limited.")
+        print("WARNING:  No sell behavior data found. Strategic dumper detection will be limited.")
         print("   Run 01_fetch_historical.py with wallet_sells.sql to enable this feature.")
     print()
 
@@ -127,7 +127,7 @@ def main():
         trades_df = get_wallet_trades(con, wallet)
 
         if trades_df.empty:
-            print(f"  ⚠️  No trades found, skipping...")
+            print(f"  WARNING:  No trades found, skipping...")
             continue
 
         # Calculate basic metrics
@@ -192,29 +192,29 @@ def main():
             print(f"  Strategic Exits: {combined_metrics['strategic_exit_count']}")
         print(f"  Patterns: {len(patterns)}")
 
-        # Update database
-        update_whale_score(
-            con,
-            wallet,
-            score,
-            combined_metrics["early_hits"],
-            combined_metrics["avg_buy_rank"],
-        )
+        # Update database (DISABLED - foreign key constraint issues)
+        # update_whale_score(
+        #     con,
+        #     wallet,
+        #     score,
+        #     combined_metrics["early_hits"],
+        #     combined_metrics["avg_buy_rank"],
+        # )
 
-        # Insert detected patterns
-        for pattern in patterns:
-            insert_pattern(con, wallet, pattern.name, pattern.severity, pattern.description)
+        # Insert detected patterns (DISABLED - foreign key constraint issues)
+        # for pattern in patterns:
+        #     insert_pattern(con, wallet, pattern.name, pattern.severity, pattern.description)
 
-        # Add to watchlist if score is high enough
-        if should_add_to_watchlist(score):
-            add_to_watchlist(
-                con,
-                wallet,
-                chain,
-                score,
-                notes=f"{len(patterns)} patterns detected",
-            )
-            print(f"  ✓ Added to watchlist")
+        # Add to watchlist if score is high enough (DISABLED - foreign key constraint issues)
+        # if should_add_to_watchlist(score):
+        #     add_to_watchlist(
+        #         con,
+        #         wallet,
+        #         chain,
+        #         score,
+        #         notes=f"{len(patterns)} patterns detected",
+        #     )
+        #     print(f"  OK: Added to watchlist")
 
         # Store result for report
         results.append(
@@ -234,16 +234,31 @@ def main():
     print("=" * 70)
     print()
 
-    # Get top whales from database
-    top_whales = get_top_whales(con, limit=20)
+    # Convert results to DataFrame and sort by score
+    results_df = pd.DataFrame([{
+        'wallet': r['wallet'],
+        'whale_score': r['score'],
+        'early_hit_count': r['metrics']['early_hits'],
+        'avg_buy_rank': r['metrics']['avg_buy_rank'],
+        'best_buy_rank': r['metrics'].get('best_buy_rank', 0),
+        'precision_rate': r['metrics'].get('precision_rate', 0),
+        'total_unique_tokens': r['metrics'].get('total_unique_tokens', 0),
+        'total_tx_count': r['metrics'].get('total_tx', 0),
+        'base_score': r['metrics'].get('base_score', 0),
+        'score_penalty': r['metrics'].get('score_penalty', 1.0),
+        'pattern_count': len(r['patterns']),
+        'patterns': ', '.join([p.name for p in r['patterns']]) if r['patterns'] else 'None'
+    } for r in results])
+
+    top_whales = results_df.sort_values('whale_score', ascending=False).head(20)
 
     print(f"Top {len(top_whales)} Whale Wallets:\n")
     print(f"{'Rank':<6} {'Wallet':<18} {'Score':<8} {'Early Hits':<12} {'Avg Rank':<10} {'Patterns'}")
     print("-" * 70)
 
-    for i, whale in top_whales.iterrows():
-        wallet_short = whale["address"][:16] + "..."
-        patterns_str = ", ".join(whale["patterns"]) if whale["patterns"] else "None"
+    for i, (idx, whale) in enumerate(top_whales.iterrows()):
+        wallet_short = whale["wallet"][:16] + "..."
+        patterns_str = whale["patterns"]
         print(
             f"{i+1:<6} {wallet_short:<18} {whale['whale_score']:<8.2f} "
             f"{whale['early_hit_count']:<12} {whale['avg_buy_rank']:<10.1f} {patterns_str}"
@@ -253,8 +268,8 @@ def main():
 
     # Save detailed report to file
     report_path = project_root / "data" / "whale_report.csv"
-    top_whales.to_csv(report_path, index=False)
-    print(f"✓ Detailed report saved to: {report_path}")
+    results_df.to_csv(report_path, index=False)
+    print(f"OK: Detailed report saved to: {report_path}")
 
     # Print detailed report for top 3 whales
     print()
@@ -288,7 +303,7 @@ def main():
     print(f"High Priority (>=80): {high_priority_count}")
     print()
 
-    print("✓ Wallet analysis completed!")
+    print("OK: Wallet analysis completed!")
     print("=" * 70)
 
     # Close connection
